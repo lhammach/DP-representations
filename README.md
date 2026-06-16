@@ -7,6 +7,6 @@ Compared scenarios :
 - ResNet with SGD
 - ResNet with DP-SGD (clipping + Gaussian noise)
 
-We keep track of the privacy accountant for each NN with Rényi divergence.
+We keep track of the privacy accountant for each NN with the Rényi divergence.
 
 We measure the similarity between layers of different NN with the centered kernel alignment (CKA).
