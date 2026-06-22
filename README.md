@@ -9,6 +9,6 @@ Compared scenarios :
 
 We keep track of the privacy accountant for each NN with the Rényi divergence.
 
-We measure the similarity between layers of different NN with the centered kernel alignment (CKA).
+We measure the similarity between layers of different NNs with the centered kernel alignment (CKA).
 
 We use different seeds to have a confidence interval for the CKA score.
