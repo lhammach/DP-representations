@@ -3,9 +3,9 @@
 This repository aims at comparing the internal representations of Neural Networks trained on image classification with Differential Privacy.
 The NN used are ResNet18, and they are trained on CIFAR10. 
 
-The notebook `dpsgd_baseline.ipynb` trains networks and saves them in a ./networks folder. The training with DPSGD followed the Opacus tutorial available here : https://opacus.ai/tutorials/building_image_classifier. 
+The notebook `dpsgd_baseline.ipynb` trains networks and saves them in a `./networks` directory. The DP-SGD training followed the [Opacus tutorial](https://opacus.ai/tutorials/building_image_classifier). 
 
-The notebook `cka_analysis.ipynb` computes the CKA scores (centered kernel alignment) for baselines and private networks and plots different comparisons.
+The notebook `cka_analysis.ipynb` computes the CKA (Centered Kernel Alignment) scores for both baselines and private networks, and plots different comparisons.
 
 # Notebooks outlines
 
