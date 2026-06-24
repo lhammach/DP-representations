@@ -9,9 +9,22 @@ The notebook `cka_analysis.ipynb` computes the CKA scores (centered kernel align
 
 # Notebooks outlines
 
-## 1. `dpsgd_baseline.ipynb`
+## `dpsgd_baseline.ipynb`
 
-## 2. `cka_analysis.ipynb`
+### 0. Setup
+### 1. Hyperparameters
+### 2. Dataset
+### 3. Models
+#### 3.1 Building a DP-compatible ResNet18
+#### 3.2 Instantiating baseline and DP networks
+### 4. Training
+#### 4.1 Training the baseline
+#### 4.2 Training the DPSGD network
+
+
+## `cka_analysis.ipynb`
+### 0. Setup
+
 
 # Methodology
 
