@@ -1,3 +1,17 @@
-.venv/
+# Generated data and outputs (large, regenerate rather than version)
 cifar10/
-networks/
+networks/*
+!networks/.gitkeep
+results/*
+!results/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment
+.venv/
+venv/

@@ -1,0 +1,17 @@
+# configs/eps_low.yaml
+# ----------------------
+# Variant: stricter privacy budget (epsilon=2).
+# Inherits all other fields from the defaults listed in default.yaml;
+# only the fields below differ once loaded via Config.from_dict (missing
+# keys keep the Config dataclass's default value).
+
+epsilon: 2.0
+delta: 1.0e-8
+max_grad_norm: 1.2
+epochs: 10
+seed: 42
+
+data_root: "./cifar10"
+networks_dir: "./networks"
+results_dir: "./results"
+logs_dir: "./logs"

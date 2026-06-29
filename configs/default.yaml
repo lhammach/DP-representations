@@ -1,0 +1,39 @@
+# configs/default.yaml
+# ---------------------
+# Default pipeline configuration. CLI override possible for any field,
+# e.g.: python train_dp.py --config configs/default.yaml --epsilon 2
+
+# --- Data ---
+data_root: "../cifar10"
+cifar10_url: "https://s3.amazonaws.com/fast-ai-imageclas/cifar10.tgz"
+
+# --- Common hyperparameters (baseline + DP) ---
+epochs: 10
+lr: 0.001
+batch_size: 128
+seed: 42
+
+# --- DP-SGD hyperparameters ---
+epsilon: 10.0
+delta: 1.0e-8
+max_grad_norm: 1.2
+max_physical_batch_size: 32
+accountant: "rdp"
+
+# --- CKA ---
+cka_batch_size: 256
+cka_num_batches: 30
+cka_kernel: "linear"   # "linear" or "gaussian"
+cka_layers:
+  - layer1
+  - layer2
+  - layer3
+  - layer4
+
+# --- Outputs ---
+networks_dir: "../networks"
+results_dir: "../results"
+logs_dir: "../logs"
+
+# --- Misc ---
+num_classes: 10

@@ -1,0 +1,1 @@
+"""src package: pipeline for comparing Baseline vs DP-SGD representations (ResNet18 / CIFAR-10)."""
