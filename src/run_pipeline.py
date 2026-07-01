@@ -92,8 +92,8 @@ def main() -> None:
         logger.info("DP step skipped (--skip-dp).")
 
     if not args.skip_cka:
-        baseline_ckpt = find_latest_checkpoint(cfg.networks_dir, "baseline_resnet18", seed=cfg.seed)
-        dp_ckpt = find_latest_checkpoint(cfg.networks_dir, "dp_resnet18", epsilon=cfg.epsilon, seed=cfg.seed)
+        baseline_ckpt = find_latest_checkpoint(cfg.networks_path(), "baseline_resnet18", seed=cfg.seed)
+        dp_ckpt = find_latest_checkpoint(cfg.networks_path(), "dp_resnet18", epsilon=cfg.epsilon, seed=cfg.seed)
 
         if baseline_ckpt is None or dp_ckpt is None:
             logger.error(

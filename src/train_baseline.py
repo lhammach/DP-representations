@@ -45,7 +45,7 @@ def main() -> None:
     run_id = make_run_id("baseline_resnet18", "NA", cfg.delta, cfg.epochs, cfg.max_grad_norm, cfg.seed)
     log_path = setup_logging(cfg.logs_dir, run_id)
     logger.info("=== Baseline run: %s ===", run_id)
-    logger.info("Full log at: %s", log_path)
+    logger.info("Experiment: %s | Full log at: %s", cfg.experiment, log_path)
 
     set_seed(cfg.seed)
 
@@ -90,7 +90,7 @@ def main() -> None:
         epochs=cfg.epochs,
         max_grad_norm=cfg.max_grad_norm,
         seed=cfg.seed,
-        save_dir=cfg.networks_dir,
+        save_dir=cfg.networks_path(),
     )
 
     save_checkpoint(
@@ -105,7 +105,7 @@ def main() -> None:
             "batch_size": cfg.batch_size,
             "training_duration_seconds": total_duration,
         },
-        extra_metadata={"run_type": "baseline", "run_id": run_id},
+        extra_metadata={"run_type": "baseline", "run_id": run_id, "experiment": cfg.experiment},
     )
 
     logger.info("Baseline training finished. Checkpoint: %s", save_path)

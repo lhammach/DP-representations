@@ -45,7 +45,7 @@ def main() -> None:
     run_id = make_run_id("dp_resnet18", cfg.epsilon, cfg.delta, cfg.epochs, cfg.max_grad_norm, cfg.seed)
     log_path = setup_logging(cfg.logs_dir, run_id)
     logger.info("=== DP-SGD run: %s ===", run_id)
-    logger.info("Full log at: %s", log_path)
+    logger.info("Experiment: %s | Full log at: %s", cfg.experiment, log_path)
     logger.info("Target privacy budget: epsilon=%s, delta=%s", cfg.epsilon, cfg.delta)
 
     set_seed(cfg.seed)
@@ -107,7 +107,7 @@ def main() -> None:
         epochs=cfg.epochs,
         max_grad_norm=cfg.max_grad_norm,
         seed=cfg.seed,
-        save_dir=cfg.networks_dir,
+        save_dir=cfg.networks_path(),
     )
 
     save_checkpoint(
@@ -126,7 +126,7 @@ def main() -> None:
             "batch_size": cfg.batch_size,
             "training_duration_seconds": total_duration,
         },
-        extra_metadata={"run_type": "dp", "run_id": run_id, "target_epsilon": cfg.epsilon},
+        extra_metadata={"run_type": "dp", "run_id": run_id, "target_epsilon": cfg.epsilon, "experiment": cfg.experiment},
     )
 
     logger.info("DP training finished (final epsilon = %.2f). Checkpoint: %s", current_epsilon, save_path)

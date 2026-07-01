@@ -54,9 +54,18 @@ class Config:
     networks_dir: str = "./networks"
     results_dir: str = "./results"
     logs_dir: str = "./logs"
+    experiment: str = "quick_tests"  # subfolder under networks/ and results/, e.g. "seed_sweep"
 
     # --- Misc ---
     num_classes: int = 10
+
+    def networks_path(self) -> str:
+        """networks_dir, with the experiment subfolder appended if set."""
+        return str(Path(self.networks_dir) / self.experiment) if self.experiment else self.networks_dir
+
+    def results_path(self) -> str:
+        """results_dir, with the experiment subfolder appended if set."""
+        return str(Path(self.results_dir) / self.experiment) if self.experiment else self.results_dir
 
     def save(self, path: str | Path) -> None:
         path = Path(path)

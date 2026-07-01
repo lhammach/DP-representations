@@ -95,3 +95,25 @@ def build_resnet18_dp_compatible(num_classes: int = 10, validate: bool = True) -
                 logger.warning("  - %s", err)
 
     return model
+
+
+def list_learnable_layers(
+    model: nn.Module,
+    include_types: tuple[type, ...] = (nn.Conv2d, nn.Linear, nn.GroupNorm),
+) -> list[str]:
+    """List the dotted names of all sub-modules with learnable weights.
+
+    By default includes Conv2d (all conv1/conv2/downsample projections),
+    Linear (the final fc layer), and GroupNorm (the affine scale/shift
+    parameters that replaced BatchNorm). This avoids hand-maintaining a
+    fixed layer list (like the old DAMIER_LAYERS) that silently goes stale
+    if the architecture changes — it always reflects the actual model.
+
+    Pass a narrower `include_types` (e.g. `(nn.Conv2d, nn.Linear)`) to
+    exclude normalization layers if you only want the "spatial" weights.
+
+    Returns:
+        Layer names in model definition order (top to bottom), e.g.
+        ["conv1", "bn1", "layer1.0.conv1", "layer1.0.bn1", ..., "fc"].
+    """
+    return [name for name, module in model.named_modules() if isinstance(module, include_types) and name]

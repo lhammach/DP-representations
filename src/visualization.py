@@ -156,6 +156,127 @@ def plot_fine_grained_matrix(
     _save_or_show(save_path)
 
 
+def plot_mean_heatmap(
+    mean_matrix: np.ndarray,
+    layers: list[str],
+    title: str = "",
+    annotate: bool = False,
+    save_path: str | Path | None = None,
+) -> None:
+    """Full layer-by-layer CKA heatmap, averaged across seed/checkpoint pairs.
+
+    Args:
+        mean_matrix: (n_layers, n_layers) array, mean CKA across pairs.
+        annotate: if True, print the numeric score in each cell (gets
+            cluttered fast beyond ~15 layers — leave off for full layer lists).
+    """
+    num_layers = len(layers)
+    fig_size = max(8, num_layers * 0.4)
+    plt.figure(figsize=(fig_size, fig_size * 0.85))
+    cax = plt.imshow(mean_matrix, cmap="viridis", vmin=0, vmax=1, origin="lower")
+    plt.colorbar(cax, label="Mean CKA Similarity (across pairs)")
+
+    plt.xticks(range(num_layers), layers, rotation=90, fontsize=8)
+    plt.yticks(range(num_layers), layers, fontsize=8)
+    plt.title(title)
+
+    if annotate:
+        for i in range(num_layers):
+            for j in range(num_layers):
+                val = mean_matrix[i, j]
+                plt.text(j, i, f"{val:.2f}", ha="center", va="center",
+                          color="white" if val < 0.6 else "black", fontsize=6)
+
+    plt.tight_layout()
+    _save_or_show(save_path)
+
+
+def plot_std_heatmap(
+    std_matrix: np.ndarray,
+    layers: list[str],
+    title: str = "",
+    save_path: str | Path | None = None,
+) -> None:
+    """Full layer-by-layer heatmap of the standard deviation across pairs.
+
+    Shows where CKA is most sensitive to seed (or checkpoint) variation,
+    without needing a 3D plot: same 2D layer x layer grid as the mean
+    heatmap, just colored by spread instead of by level.
+    """
+    num_layers = len(layers)
+    fig_size = max(8, num_layers * 0.4)
+    plt.figure(figsize=(fig_size, fig_size * 0.85))
+    cax = plt.imshow(std_matrix, cmap="magma", vmin=0, origin="lower")
+    plt.colorbar(cax, label="Std. dev. of CKA across pairs")
+
+    plt.xticks(range(num_layers), layers, rotation=90, fontsize=8)
+    plt.yticks(range(num_layers), layers, fontsize=8)
+    plt.title(title)
+
+    plt.tight_layout()
+    _save_or_show(save_path)
+
+
+def plot_diagonal_stats(
+    all_pair_matrices: list[np.ndarray],
+    layers: list[str],
+    title: str = "",
+    save_path: str | Path | None = None,
+) -> dict[str, dict[str, float]]:
+    """Diagonal (layer i vs layer i) CKA across pairs: mean, 95% CI, min/max.
+
+    This is the plot that directly answers "how low does same-layer CKA
+    naturally go across seeds/checkpoints?" — the rest of the matrix
+    (off-diagonal, cross-layer) is summarized separately by the heatmaps.
+
+    Args:
+        all_pair_matrices: one (n_layers, n_layers) array per pair.
+
+    Returns:
+        {layer_name: {"mean", "ci95", "min", "max", "n_pairs"}}
+    """
+    diag_values = np.array([np.diag(m) for m in all_pair_matrices])  # (n_pairs, n_layers)
+    n_pairs = diag_values.shape[0]
+
+    means = diag_values.mean(axis=0)
+    mins = diag_values.min(axis=0)
+    maxs = diag_values.max(axis=0)
+    if n_pairs > 1:
+        sem = diag_values.std(axis=0, ddof=1) / np.sqrt(n_pairs)
+        cis = sem * stats.t.ppf(0.975, n_pairs - 1)
+    else:
+        cis = np.zeros_like(means)
+
+    x = np.arange(len(layers))
+    plt.figure(figsize=(max(10, len(layers) * 0.4), 5))
+    plt.fill_between(x, mins, maxs, color="gray", alpha=0.2, label="Min–max range")
+    plt.fill_between(x, means - cis, means + cis, color="blue", alpha=0.3, label="95% CI")
+    plt.plot(x, means, "o-", color="blue", linewidth=2, label="Mean")
+    plt.xticks(x, layers, rotation=90, fontsize=8)
+    plt.ylabel("CKA Score")
+    plt.ylim(-0.05, 1.05)
+    plt.title(f"{title}\n(n = {n_pairs} pair{'s' if n_pairs != 1 else ''})")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend(loc="lower left")
+
+    plt.tight_layout()
+    _save_or_show(save_path)
+
+    summary = {}
+    logger.info("--- Diagonal CKA across pairs (n=%d) ---", n_pairs)
+    for idx, layer in enumerate(layers):
+        summary[layer] = {
+            "mean": float(means[idx]), "ci95": float(cis[idx]),
+            "min": float(mins[idx]), "max": float(maxs[idx]), "n_pairs": n_pairs,
+        }
+        logger.info(
+            "%s : mean=%.4f ± %.4f (95%% CI) | range=[%.4f, %.4f]",
+            layer, means[idx], cis[idx], mins[idx], maxs[idx],
+        )
+
+    return summary
+
+
 def _save_or_show(save_path: str | Path | None) -> None:
     if save_path is not None:
         save_path = Path(save_path)
