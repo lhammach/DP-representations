@@ -8,7 +8,8 @@ timestamp).
 
 Examples:
     python train_baseline.py --config configs/default.yaml
-    python train_baseline.py --epochs 5 --seed 43 --lr 5e-4
+    python train_baseline.py --epochs 5 --seed 43 --lr 0.1 --optimizer sgd
+    python train_baseline.py --cifar-stem True --optimizer sgd --lr 0.1
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ import time
 from pathlib import Path
 
 import torch
-import torch.optim as optim
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -29,7 +29,7 @@ from checkpoint import get_checkpoint_path, make_run_id, save_checkpoint
 from data import download_cifar10, load_cifar10, set_seed
 from logging_utils import setup_logging
 from model import build_resnet18_dp_compatible
-from training import evaluate, train_one_epoch_baseline
+from training import build_optimizer, build_scheduler, evaluate, train_one_epoch_baseline
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,16 @@ def main() -> None:
     cfg = load_config(args.config)
     cfg = apply_overrides(cfg, args)
 
-    run_id = make_run_id("baseline_resnet18", "NA", cfg.delta, cfg.epochs, cfg.max_grad_norm, cfg.seed)
+    run_id = make_run_id(
+        "baseline_resnet18", "NA", cfg.delta, cfg.epochs, cfg.max_grad_norm, cfg.seed,
+        lr=cfg.lr, optimizer=cfg.optimizer, cifar_stem=cfg.cifar_stem,
+        lr_scheduler=cfg.lr_scheduler,
+    )
     log_path = setup_logging(cfg.logs_dir, run_id)
     logger.info("=== Baseline run: %s ===", run_id)
     logger.info("Experiment: %s | Full log at: %s", cfg.experiment, log_path)
+    if cfg.cifar_stem:
+        logger.info("Architecture: CIFAR-10 stem (3x3 conv, no MaxPool)")
 
     set_seed(cfg.seed)
 
@@ -53,43 +59,40 @@ def main() -> None:
     logger.info("Using device: %s", device)
 
     download_cifar10(cfg.data_root, cfg.cifar10_url)
-    train_loader, test_loader, train_dataset, test_dataset = load_cifar10(
-        cfg.data_root, batch_size=cfg.batch_size
-    )
+    train_loader, test_loader, _, _ = load_cifar10(cfg.data_root, batch_size=cfg.batch_size)
 
-    model = build_resnet18_dp_compatible(num_classes=cfg.num_classes).to(device)
-    optimizer = optim.RMSprop(model.parameters(), lr=cfg.lr)
+    model = build_resnet18_dp_compatible(num_classes=cfg.num_classes, cifar_stem=cfg.cifar_stem).to(device)
+    optimizer = build_optimizer(model, cfg.optimizer, cfg.lr, cfg.momentum)
+    scheduler = build_scheduler(optimizer, cfg.lr_scheduler, cfg.epochs, cfg.lr_min)
 
     train_acc_history: list[float] = []
     test_acc_history: list[float] = []
-
+    lr_history: list[float] = []
     training_start = time.perf_counter()
 
     for epoch in range(cfg.epochs):
         epoch_start = time.perf_counter()
+        current_lr = optimizer.param_groups[0]["lr"]
+        lr_history.append(current_lr)
 
         train_acc = train_one_epoch_baseline(model, train_loader, optimizer, epoch + 1, device)
         train_acc_history.append(train_acc)
-
         test_acc = evaluate(model, test_loader, device, prefix="Baseline test")
         test_acc_history.append(test_acc)
 
-        epoch_duration = time.perf_counter() - epoch_start
-        logger.info("Epoch %d completed in %.1fs", epoch + 1, epoch_duration)
+        if scheduler is not None:
+            scheduler.step()
+
+        logger.info("Epoch %d completed in %.1fs | lr=%.2e", epoch + 1, time.perf_counter() - epoch_start, current_lr)
 
     total_duration = time.perf_counter() - training_start
-    logger.info(
-        "Total training time: %.1fs (%.2f min) for %d epoch(s)",
-        total_duration, total_duration / 60, cfg.epochs,
-    )
+    logger.info("Total training time: %.1fs (%.2f min) for %d epoch(s)", total_duration, total_duration / 60, cfg.epochs)
 
     save_path = get_checkpoint_path(
-        prefix="baseline_resnet18",
-        epsilon="NA",
-        delta=cfg.delta,
-        epochs=cfg.epochs,
-        max_grad_norm=cfg.max_grad_norm,
-        seed=cfg.seed,
+        prefix="baseline_resnet18", epsilon="NA", delta=cfg.delta,
+        epochs=cfg.epochs, max_grad_norm=cfg.max_grad_norm, seed=cfg.seed,
+        lr=cfg.lr, optimizer=cfg.optimizer, cifar_stem=cfg.cifar_stem,
+        lr_scheduler=cfg.lr_scheduler,
         save_dir=cfg.networks_path(),
     )
 
@@ -100,8 +103,14 @@ def main() -> None:
             "model_state_dict": model.state_dict(),
             "train_acc_history": train_acc_history,
             "test_acc_history": test_acc_history,
+            "lr_history": lr_history,
+            "lr_scheduler": cfg.lr_scheduler,
+            "lr_min": cfg.lr_min,
             "seed": cfg.seed,
             "lr": cfg.lr,
+            "optimizer": cfg.optimizer,
+            "momentum": cfg.momentum,
+            "cifar_stem": cfg.cifar_stem,
             "batch_size": cfg.batch_size,
             "training_duration_seconds": total_duration,
         },

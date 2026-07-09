@@ -26,6 +26,80 @@ def accuracy_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> float:
     return (preds == labels).float().mean().item()
 
 
+def build_optimizer(
+    model: nn.Module,
+    optimizer: str,
+    lr: float,
+    momentum: float = 0.9,
+) -> optim.Optimizer:
+    """Build the optimizer from a name string.
+
+    Supported values: "sgd", "adam", "rmsprop".
+
+    Why SGD for DP-SGD?
+    The DP-SGD literature consistently uses SGD with momentum as the base
+    optimizer. The noise injected by DP-SGD is additive Gaussian on each
+    gradient — this is theoretically well-understood for SGD. Adaptive
+    optimizers (Adam, RMSprop) maintain running statistics of gradient
+    variance that get corrupted by DP noise, making their updates less
+    principled (hence the dedicated DP-Adam / DP-AdamBC variants in the
+    literature). SGD with momentum is therefore the safest default for
+    comparing DP vs non-DP representations, and should be tried first.
+
+    Recommended starting points:
+    - SGD   : lr=0.1, momentum=0.9  (classic for CIFAR-10)
+    - Adam  : lr=1e-3
+    - RMSprop: lr=1e-3 (original notebook default, generally worse for DP)
+    """
+    name = optimizer.lower().strip()
+    if name == "sgd":
+        opt = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
+        logger.info("Optimizer: SGD (lr=%g, momentum=%g)", lr, momentum)
+    elif name == "adam":
+        opt = optim.Adam(model.parameters(), lr=lr)
+        logger.info("Optimizer: Adam (lr=%g)", lr)
+    elif name == "rmsprop":
+        opt = optim.RMSprop(model.parameters(), lr=lr)
+        logger.info("Optimizer: RMSprop (lr=%g)", lr)
+    else:
+        raise ValueError(f"Unknown optimizer '{optimizer}'. Choose from: sgd, adam, rmsprop.")
+    return opt
+
+
+def build_scheduler(
+    optimizer: optim.Optimizer,
+    scheduler: str,
+    epochs: int,
+    lr_min: float = 1e-4,
+) -> optim.lr_scheduler.LRScheduler | None:
+    """Build a learning rate scheduler, or return None for a constant LR.
+
+    Args:
+        scheduler: "none" (constant LR) or "cosine" (CosineAnnealingLR).
+        epochs: total number of training epochs — used as T_max for cosine.
+        lr_min: minimum LR at the end of cosine annealing (eta_min).
+
+    Why cosine annealing works well with DP-SGD:
+        DP-SGD adds Gaussian noise to every gradient update, so the effective
+        signal-to-noise ratio is low throughout training. A high LR early on
+        lets the model explore despite the noise; decaying to a small LR near
+        the end lets it converge stably without being thrown off by gradient
+        noise. CosineAnnealingLR does this smoothly (no abrupt step drops
+        that can cause instability).
+    """
+    name = scheduler.lower().strip()
+    if name == "none":
+        return None
+    elif name == "cosine":
+        sched = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr_min)
+        logger.info("Scheduler: CosineAnnealingLR (T_max=%d, eta_min=%g)", epochs, lr_min)
+        return sched
+    else:
+        raise ValueError(f"Unknown scheduler '{scheduler}'. Choose from: none, cosine.")
+    preds = logits.argmax(dim=1)
+    return (preds == labels).float().mean().item()
+
+
 def train_one_epoch_baseline(
     model: nn.Module,
     train_loader: DataLoader,
@@ -149,6 +223,49 @@ def make_private(
         max_grad_norm=max_grad_norm,
     )
     logger.info("Sigma computed by Opacus: %.4f (C=%.2f)", dp_optimizer.noise_multiplier, max_grad_norm)
+    return dp_model, dp_optimizer, dp_loader, privacy_engine
+
+
+def make_private_ablation(
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    train_loader: DataLoader,
+    noise_multiplier: float,
+    max_grad_norm: float,
+    accountant: str = "rdp",
+) -> tuple[nn.Module, optim.Optimizer, DataLoader, PrivacyEngine]:
+    """Wrap model/optimizer/dataloader with Opacus for ablation studies.
+
+    Unlike `make_private`, this function takes `noise_multiplier` and
+    `max_grad_norm` directly instead of deriving them from a target epsilon.
+    This lets you independently disable clipping (very large max_grad_norm)
+    or noise (noise_multiplier=0.0) while keeping the other mechanism.
+
+    Note: with noise_multiplier=0 there is no privacy guarantee (epsilon=inf),
+    which is the point of the "no noise" ablation — it isolates the effect of
+    gradient clipping alone on representations.
+
+    Args:
+        noise_multiplier: std of the Gaussian noise added to each gradient.
+            Set to 0.0 to disable noise (clipping-only ablation).
+        max_grad_norm: per-sample gradient clipping bound.
+            Set to a very large value (e.g. 1e6) to effectively disable
+            clipping (noise-only ablation). Note that with no clipping and
+            no noise you get standard SGD, not a meaningful DP ablation.
+    """
+    privacy_engine = PrivacyEngine(accountant=accountant)
+
+    dp_model, dp_optimizer, dp_loader = privacy_engine.make_private(
+        module=model,
+        optimizer=optimizer,
+        data_loader=train_loader,
+        noise_multiplier=noise_multiplier,
+        max_grad_norm=max_grad_norm,
+    )
+    logger.info(
+        "Ablation mode: noise_multiplier=%.4f, max_grad_norm=%.2f",
+        noise_multiplier, max_grad_norm,
+    )
     return dp_model, dp_optimizer, dp_loader, privacy_engine
 
 

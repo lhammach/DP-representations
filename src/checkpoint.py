@@ -37,13 +37,29 @@ def make_run_id(
     epochs: int,
     max_grad_norm: float,
     seed: int,
+    lr: float | None = None,
+    optimizer: str | None = None,
+    cifar_stem: bool = False,
+    lr_scheduler: str | None = None,
     timestamp: str | None = None,
 ) -> str:
     """Build the run identifier used to name checkpoints and logs."""
     ts = timestamp or datetime.now().strftime("%Y%m%d-%H%M%S")
     delta_str = _format_delta(delta)
     eps_str = epsilon if isinstance(epsilon, str) else f"{epsilon:g}"
-    return f"{prefix}_eps{eps_str}_delta{delta_str}_epoch{epochs}_C{max_grad_norm}_seed{seed}_{ts}"
+
+    parts = [f"{prefix}_eps{eps_str}_delta{delta_str}_epoch{epochs}_C{max_grad_norm}"]
+    if lr is not None:
+        parts.append(f"LR{lr:g}")
+    if optimizer is not None and optimizer != "sgd":
+        parts.append(optimizer.upper())
+    if lr_scheduler is not None and lr_scheduler != "none":
+        parts.append(lr_scheduler.upper())
+    if cifar_stem:
+        parts.append("cifarSTEM")
+    parts.append(f"seed{seed}")
+    parts.append(ts)
+    return "_".join(parts)
 
 
 def get_checkpoint_path(
@@ -54,13 +70,17 @@ def get_checkpoint_path(
     max_grad_norm: float,
     seed: int,
     save_dir: str | Path,
+    lr: float | None = None,
+    optimizer: str | None = None,
+    cifar_stem: bool = False,
+    lr_scheduler: str | None = None,
     ext: str = "pth",
     timestamp: str | None = None,
 ) -> Path:
     """Generate a unique checkpoint path (timestamp included, so never a collision)."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    run_id = make_run_id(prefix, epsilon, delta, epochs, max_grad_norm, seed, timestamp)
+    run_id = make_run_id(prefix, epsilon, delta, epochs, max_grad_norm, seed, lr, optimizer, cifar_stem, lr_scheduler, timestamp)
     return save_dir / f"{run_id}.{ext}"
 
 

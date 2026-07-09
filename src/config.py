@@ -34,6 +34,11 @@ class Config:
     lr: float = 1e-3
     batch_size: int = 128
     seed: int = 42
+    optimizer: str = "sgd"       # "sgd" | "adam" | "rmsprop"
+    momentum: float = 0.9        # used only with sgd
+    cifar_stem: bool = False     # True = 3x3 conv stem adapted for 32x32 CIFAR-10 images
+    lr_scheduler: str = "none"   # "none" | "cosine"
+    lr_min: float = 1e-4         # minimum LR for cosine annealing (ignored if lr_scheduler="none")
 
     # --- DP-SGD hyperparameters ---
     epsilon: float = 10.0
@@ -99,6 +104,18 @@ def load_config(path: str | Path | None) -> Config:
     return Config.from_dict(raw)
 
 
+def _str_to_bool(v: str) -> bool:
+    """Convertit 'true'/'false'/'1'/'0' en bool pour argparse.
+    Nécessaire car bool('False') == True en Python."""
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes"):
+        return True
+    if v.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected, got '{v}'")
+
+
 def add_config_overrides_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Add CLI arguments allowing any Config field to be overridden."""
     parser.add_argument("--config", type=str, default=None, help="Path to a YAML config file")
@@ -110,7 +127,12 @@ def add_config_overrides_args(parser: argparse.ArgumentParser) -> argparse.Argum
             )
             continue
         flag = "--" + f.name.replace("_", "-")
-        arg_type = type(f.default) if f.default is not None else str
+        # bool fields need special handling: bool("False") == True in Python,
+        # so we can't use type=bool directly.
+        if isinstance(f.default, bool):
+            arg_type = _str_to_bool
+        else:
+            arg_type = type(f.default) if f.default is not None else str
         parser.add_argument(flag, type=arg_type, default=None, help=f"Override for '{f.name}'")
     return parser
 
