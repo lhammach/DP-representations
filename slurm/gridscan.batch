@@ -1,0 +1,30 @@
+#!/bin/bash
+#
+
+#SBATCH --job-name=DpRes
+#SBATCH --ntasks=1                    # A single task (process)
+#SBATCH --cpus-per-task=4             # Using a single CPU
+#SBATCH --gres=gpu:1
+#SBATCH --time=03:00:00               # Time limit hrs:min:sec
+#SBATCH --output=log/%x_%j.log        # Standard output and error log. %x denotes the job name, %j the jobid.
+#SBATCH --no-requeue
+#SBATCH -C a100
+
+module purge
+module load arch/a100
+module load pytorch-gpu/py3/2.8.0
+
+ID=${SLURM_ARRAY_TASK_ID}
+
+ETAS=(3.2 1.0 0.32 0.1 0.032 0.01 0.0032 0.001)
+CLIPS=(0.01 0.1 1.0)
+LENETA=${#ETAS[@]}
+
+ETA=${ETAS[$(( $ID % $LENETA ))]}
+CLIP=${CLIPS[$(( $ID / $LENETA ))]}
+
+date
+python3 --version
+python3 -m pip install --user --find-links ~/pip-pkg/ ~/pip-pkg/opacus-1.6.0-py3-none-any.whl
+
+python3 src/train_dp.py --experiment GRID-JZ --lr ${ETA} --max-grad-norm ${CLIP} --epochs 50
