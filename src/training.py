@@ -171,11 +171,12 @@ def train_one_epoch_dp(
 
     epsilon = privacy_engine.get_epsilon(delta)
     mean_acc = float(np.mean(accs))
+    mean_loss = float(np.mean(losses))
     logger.info(
         "[DP] Epoch %d | Loss: %.4f | Train Acc: %.2f%% | (ε = %.2f, δ = %.2e)",
         epoch, np.mean(losses), mean_acc * 100, epsilon, delta,
     )
-    return mean_acc, epsilon
+    return mean_acc, mean_loss, epsilon
 
 
 @torch.no_grad()

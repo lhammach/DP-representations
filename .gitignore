@@ -6,6 +6,7 @@ results/*
 !results/.gitkeep
 logs/*
 !logs/.gitkeep
+dump/*
 
 # Python
 __pycache__/
