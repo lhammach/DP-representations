@@ -24,9 +24,12 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
+import os
 import sys
 import time
+from typing import Dict, Any
 from pathlib import Path
 
 import torch
@@ -54,6 +57,20 @@ logger = logging.getLogger(__name__)
 
 # Large value used to "disable" clipping: gradients are virtually never clipped
 _NO_CLIP_NORM = 1e6
+
+def dump_perf_to_csv(
+        filename: str,
+        dump_dict: Dict[str, Any],
+        ) -> None:
+    keys = list(sorted(dump_dict.keys()))
+    if not os.path.isfile(filename):
+        with open(filename, 'w') as f:
+            f.write(','.join(keys) + "\n")
+    with open(filename, 'a') as f:
+        fcntl.lockf(f, fcntl.LOCK_EX)
+        line = ','.join([ str(dump_dict[k]) for k in keys ])
+        f.write(line + "\n")
+        fcntl.lockf(f, fcntl.F_UNLCK)
 
 
 def main() -> None:
@@ -94,6 +111,8 @@ def main() -> None:
     log_path = setup_logging(cfg.logs_dir, run_id)
     logger.info("=== DP-SGD run: %s ===", run_id)
     logger.info("Experiment: %s | Full log at: %s", cfg.experiment, log_path)
+
+    CSV_FILENAME = cfg.logs_dir + "/gridsearch_result.csv"
 
     if args.no_clip:
         logger.info("ABLATION: gradient clipping DISABLED (max_grad_norm=1e6). Noise is active.")
@@ -175,7 +194,7 @@ def main() -> None:
         current_lr = dp_optimizer.param_groups[0]["lr"]
         lr_history.append(current_lr)
 
-        train_acc, current_epsilon = train_one_epoch_dp(
+        train_acc, train_loss, current_epsilon = train_one_epoch_dp(
             dp_model, dp_train_loader, dp_optimizer, epoch + 1, device,
             privacy_engine, cfg.max_physical_batch_size, cfg.delta,
         )
@@ -188,6 +207,34 @@ def main() -> None:
 
         epoch_duration = time.perf_counter() - epoch_start
         logger.info("Epoch %d completed in %.1fs | lr=%.2e", epoch + 1, epoch_duration, current_lr)
+
+        dump_dict = {
+                "epoch": epoch + 1,
+                "total_epochs": cfg.epochs,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                "test_acc": test_acc,
+                "noise_multiplier": dp_optimizer.noise_multiplier,
+                "max_grad_norm": _NO_CLIP_NORM if args.no_clip else cfg.max_grad_norm,
+                "epsilon": current_epsilon,
+                "delta": cfg.delta,
+                "base_lr": cfg.lr,
+                "real_lr": current_lr,
+                "lr_scheduler": cfg.lr_scheduler,
+                "lr_min": cfg.lr_min,
+                "optimizer": cfg.optimizer,
+                "momentum": cfg.momentum,
+                "cifar_stem": cfg.cifar_stem,
+                "batch_size": cfg.batch_size,
+                "epoch_duration_seconds": epoch_duration,
+                "ablation_no_clip": args.no_clip,
+                "ablation_no_noise": args.no_noise,
+                "run_type": f"dp{ablation_tag}",
+                "run_id": run_id,
+                "target_epsilon": str(epsilon_label),
+                "experiment": cfg.experiment,
+                }
+        dump_perf_to_csv(CSV_FILENAME, dump_dict)
 
     total_duration = time.perf_counter() - training_start
     logger.info(

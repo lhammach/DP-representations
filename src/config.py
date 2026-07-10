@@ -36,7 +36,7 @@ class Config:
     seed: int = 42
     optimizer: str = "sgd"       # "sgd" | "adam" | "rmsprop"
     momentum: float = 0.9        # used only with sgd
-    cifar_stem: bool = False     # True = 3x3 conv stem adapted for 32x32 CIFAR-10 images
+    cifar_stem: bool = True      # True = 3x3 conv stem adapted for 32x32 CIFAR-10 images
     lr_scheduler: str = "none"   # "none" | "cosine"
     lr_min: float = 1e-4         # minimum LR for cosine annealing (ignored if lr_scheduler="none")
 
