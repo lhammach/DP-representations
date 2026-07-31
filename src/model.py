@@ -138,6 +138,65 @@ def build_resnet18_dp_compatible(
     return model
 
 
+def build_model(
+    model_name: str,
+    num_classes: int = 10,
+    cifar_stem: bool = False,
+    validate: bool = True,
+) -> nn.Module:
+    """Build the requested model architecture, DP-compatible.
+
+    Args:
+        model_name: one of:
+            "resnet18"           — ResNet18 with GroupNorm (default)
+            "wideresnet-16-4"   — WideResNet depth=16, k=4  (~2.7M params)
+            "wideresnet-16-8"   — WideResNet depth=16, k=8  (~11M params)
+            "wideresnet-40-4"   — WideResNet depth=40, k=4  (~8.9M params)
+        cifar_stem: only applies to resnet18 (WideResNet always uses a 3×3
+            stem without MaxPool natively).
+        num_classes: number of output classes.
+
+    Returns:
+        A DP-compatible nn.Module.
+    """
+    name = model_name.lower().strip()
+    if name == "resnet18":
+        return build_resnet18_dp_compatible(num_classes=num_classes,
+                                            cifar_stem=cifar_stem,
+                                            validate=validate)
+    elif name in ("wideresnet-16-4", "wrn-16-4"):
+        from wide_resnet import build_wide_resnet_dp_compatible
+        return build_wide_resnet_dp_compatible(depth=16, widen_factor=4,
+                                               num_classes=num_classes,
+                                               validate=validate)
+    elif name in ("wideresnet-16-8", "wrn-16-8"):
+        from wide_resnet import build_wide_resnet_dp_compatible
+        return build_wide_resnet_dp_compatible(depth=16, widen_factor=8,
+                                               num_classes=num_classes,
+                                               validate=validate)
+    elif name in ("wideresnet-40-4", "wrn-40-4"):
+        from wide_resnet import build_wide_resnet_dp_compatible
+        return build_wide_resnet_dp_compatible(depth=40, widen_factor=4,
+                                               num_classes=num_classes,
+                                               validate=validate)
+    elif name in ("vit-t", "vit-s"):
+        try:
+            from vit import build_vit_dp_compatible
+        except ImportError:
+            from vit_cifar import build_vit_dp_compatible
+        # Dropout causes RuntimeError with Opacus vmap per-sample gradients.
+        # Setting dropout=0 fixes this without changing the architecture.
+        return build_vit_dp_compatible(vit_type=name, num_classes=num_classes,
+                                       dropout=0.0, emb_dropout=0.0,
+                                       validate=validate)
+    else:
+        raise ValueError(
+            f"Unknown model '{model_name}'. "
+            "Choose from: resnet18, wideresnet-16-4, wideresnet-16-8, "
+            "wideresnet-40-4, vit-t, vit-s"
+        )
+
+
 def list_learnable_layers(
     model: nn.Module,
     include_types: tuple[type, ...] = (nn.Conv2d, nn.Linear, nn.GroupNorm),

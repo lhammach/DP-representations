@@ -71,7 +71,7 @@ from config import add_config_overrides_args, apply_overrides, load_config
 from checkpoint import load_checkpoint
 from data import load_cifar10
 from logging_utils import setup_logging
-from model import build_resnet18_dp_compatible, list_learnable_layers
+from model import build_model, build_resnet18_dp_compatible, list_learnable_layers
 from visualization import (
     plot_accuracy_curves,
     plot_cka_results,
@@ -87,28 +87,31 @@ logger = logging.getLogger(__name__)
 
 
 def load_model_from_checkpoint(ckpt_path: str, num_classes: int, device: torch.device) -> torch.nn.Module:
-    """Rebuild the DP-compatible architecture and load the checkpoint's weights.
+    """Rebuild the correct architecture from checkpoint metadata and load weights.
 
-    Reads `cifar_stem` from the checkpoint JSON (if present) to ensure the
-    architecture matches exactly what was used during training. This is
-    critical: loading a checkpoint trained with cifar_stem=True into a
-    standard stem model would silently succeed (same parameter names) but
-    produce wrong results because conv1 would have wrong kernel size.
+    Reads both `cifar_stem` and `model` from the JSON sidecar so that the
+    architecture matches exactly what was used during training — critical for
+    WideResNet checkpoints which have a completely different parameter layout
+    from ResNet18.
     """
+    from model import build_model  # already imported at module level, but safe to repeat
     ckpt = load_checkpoint(ckpt_path, map_location=str(device))
 
-    # Read cifar_stem from the JSON sidecar if available, else from the pth payload
     json_path = Path(ckpt_path).with_suffix(".json")
     cifar_stem = False
+    model_name = "resnet18"
     if json_path.exists():
         import json as _json
         with open(json_path) as f:
             meta = _json.load(f)
         cifar_stem = meta.get("cifar_stem", False)
+        model_name = meta.get("model", "resnet18")
     else:
         cifar_stem = ckpt.get("cifar_stem", False)
+        model_name = ckpt.get("model", "resnet18")
 
-    model = build_resnet18_dp_compatible(num_classes=num_classes, cifar_stem=cifar_stem).to(device)
+    model = build_model(model_name, num_classes=num_classes,
+                        cifar_stem=cifar_stem).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     return model
@@ -193,16 +196,29 @@ def cmd_multi_seed(args: argparse.Namespace, cfg) -> None:
     logger.info("Layers used (%d): %s", len(layers), ", ".join(layers))
 
     # Déduire les labels d'axes depuis --label-a / --label-b ou depuis le mode
+    filter_str = getattr(args, "filter", None)
+
     if args.ckpts_a and args.ckpts_b:
+        if filter_str:
+            orig_a, orig_b = len(args.ckpts_a), len(args.ckpts_b)
+            args.ckpts_a = [p for p in args.ckpts_a if filter_str in Path(p).name]
+            args.ckpts_b = [p for p in args.ckpts_b if filter_str in Path(p).name]
+            logger.info("--filter '%s' applied: %d→%d ckpts-a, %d→%d ckpts-b",
+                        filter_str, orig_a, len(args.ckpts_a), orig_b, len(args.ckpts_b))
         if len(args.ckpts_a) != len(args.ckpts_b):
             raise ValueError("--ckpts-a and --ckpts-b must have the same length (matched by position/seed)")
         ckpt_pairs = list(zip(args.ckpts_a, args.ckpts_b))
-        axis_y = args.label_a or "Group A"   # Y = lignes = groupe A (ckpts-a)
-        axis_x = args.label_b or "Group B"   # X = colonnes = groupe B (ckpts-b)
+        axis_y = args.label_a or "Group A"
+        axis_x = args.label_b or "Group B"
         logger.info("Two-group mode: %d matched pairs | Y=%s  X=%s", len(ckpt_pairs), axis_y, axis_x)
     elif args.ckpts:
+        if filter_str:
+            orig = len(args.ckpts)
+            args.ckpts = [p for p in args.ckpts if filter_str in Path(p).name]
+            logger.info("--filter '%s' applied: %d→%d checkpoints kept", filter_str, orig, len(args.ckpts))
         if len(args.ckpts) < 2:
-            raise ValueError("--ckpts needs at least 2 checkpoints to form pairs")
+            raise ValueError("--ckpts needs at least 2 checkpoints to form pairs"
+                             + (f" (after --filter '{filter_str}')" if filter_str else ""))
         ckpt_pairs = list(itertools.combinations(args.ckpts, 2))
         axis_y = args.label_a or args.label
         axis_x = args.label_b or args.label
@@ -405,6 +421,7 @@ def _make_series_label(meta: dict) -> str:
     eps = meta.get("epsilon", "")
     C = meta.get("max_grad_norm", "")
     lr = meta.get("lr", "")
+    B = meta.get("batch_size", "")
 
     parts = [run_type, f"seed{seed}", f"ep{epoch}"]
     if eps not in ("", "NA", None):
@@ -413,6 +430,8 @@ def _make_series_label(meta: dict) -> str:
         parts.append(f"C={C}")
     if lr not in ("", None):
         parts.append(f"lr={lr}")
+    if B not in ("", None):
+        parts.append(f"B={B}")
     return " | ".join(parts)
 
 
@@ -528,7 +547,7 @@ def cmd_zscore(args: argparse.Namespace, cfg) -> None:
         )
 
     label = args.label or "zscore"
-    out_dir = Path(args.out_dir) if args.out_dir else Path(args.target_npy).parent
+    out_dir = Path(args.out_dir) if args.out_dir else Path(cfg.results_path())
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = _timestamp()
     out_prefix = out_dir / f"cka_zscore_{label}_{ts}"
@@ -564,6 +583,186 @@ def cmd_zscore(args: argparse.Namespace, cfg) -> None:
         }, f, indent=2)
 
     logger.info("Results saved: %s.*", out_prefix)
+
+
+def _epoch_from_npy(npy_path: str, json_path: Path) -> int:
+    """Extract epoch number from JSON sidecar or filename (_epN pattern)."""
+    if json_path.exists():
+        with open(json_path) as f:
+            meta = json.load(f)
+        ep = meta.get("epoch")
+        if ep is not None:
+            return int(ep)
+    # Fallback: parse _epN from filename
+    import re
+    m = re.search(r"_ep(\d+)", Path(npy_path).stem)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+def cmd_animate(args: argparse.Namespace, cfg) -> None:
+    """Generate an animated GIF of CKA heatmaps across epochs.
+
+    If --ref-npy is provided, a second panel shows the z-score relative to
+    the reference (e.g. baseline-vs-baseline across seeds), computed as:
+        z(i,j,t) = (CKA_target(i,j,t) - mean_ref(i,j)) / max(std_ref(i,j), std_floor)
+
+    Each .npy file (shape n_pairs × n_layers × n_layers or n_layers × n_layers)
+    produces one frame. Frames are sorted by epoch number automatically.
+    The color scale is fixed across all frames.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.animation as animation
+
+    # ── Load reference ──
+    # Two modes:
+    # - args.ref_npy  (single file): fixed reference for all epochs (e.g. final baseline-vs-baseline)
+    # - args.ref_npys (list):        epoch-matched reference (baseline-vs-baseline at each epoch)
+    ref_mean: np.ndarray | None = None
+    ref_std: np.ndarray | None = None
+    ref_per_epoch: list[tuple[np.ndarray, np.ndarray]] | None = None  # (mean, std) per epoch
+
+    if getattr(args, "ref_npys", None):
+        # Epoch-matched: load and sort by epoch
+        ref_frames_raw = []
+        for p in args.ref_npys:
+            jp = Path(p).with_suffix(".json")
+            ep = _epoch_from_npy(p, jp)
+            raw = np.load(p)
+            m = raw.mean(axis=0) if raw.ndim == 3 else raw
+            s = raw.std(axis=0) if raw.ndim == 3 else np.zeros_like(m)
+            ref_frames_raw.append((ep, m, s))
+        ref_frames_raw.sort(key=lambda x: x[0])
+        ref_per_epoch = [(m, s) for _, m, s in ref_frames_raw]
+        logger.info("Epoch-matched reference: %d files", len(ref_per_epoch))
+    elif getattr(args, "ref_npy", None):
+        raw = np.load(args.ref_npy)
+        ref_mean = raw.mean(axis=0) if raw.ndim == 3 else raw
+        ref_std = raw.std(axis=0) if raw.ndim == 3 else np.zeros_like(ref_mean)
+        logger.info("Fixed reference loaded: %s", args.ref_npy)
+
+    # ── Load and sort target frames ──
+    frames_raw: list[tuple[int, np.ndarray, np.ndarray, list[str]]] = []
+    for npy_path in args.npys:
+        json_path = Path(npy_path).with_suffix(".json")
+        epoch = _epoch_from_npy(npy_path, json_path)
+        raw = np.load(npy_path)
+        mean_matrix = raw.mean(axis=0) if raw.ndim == 3 else raw
+        std_matrix = raw.std(axis=0) if raw.ndim == 3 else np.zeros_like(mean_matrix)
+        layers: list[str] = []
+        if json_path.exists():
+            with open(json_path) as f:
+                layers = json.load(f).get("layers", [])
+        if not layers:
+            layers = [str(i) for i in range(mean_matrix.shape[0])]
+        frames_raw.append((epoch, mean_matrix, std_matrix, layers))
+
+    frames_raw.sort(key=lambda x: x[0])
+    logger.info("Animation: %d frames, epochs %d → %d, type=%s",
+                len(frames_raw), frames_raw[0][0], frames_raw[-1][0],
+                getattr(args, "anim_type", "cka"))
+
+    layers = frames_raw[0][3]
+    n_layers = len(layers)
+    std_floor = args.std_floor
+    anim_type = getattr(args, "anim_type", "cka")
+
+    # ── Build per-frame matrices according to type ──
+    if anim_type == "std":
+        frames = [(ep, std, layers) for ep, _, std, layers in frames_raw]
+        vmin_cka, vmax_cka = 0.0, max(m.max() for _, m, _ in frames)
+        cmap_main, cbar_label_main = "magma", "Std CKA across pairs"
+        title_type = "Std CKA"
+
+    elif anim_type == "zscore":
+        if not ref_per_epoch and ref_mean is None:
+            raise ValueError("--type zscore requires --ref-npys.")
+        if ref_per_epoch is not None and len(ref_per_epoch) != len(frames_raw):
+            raise ValueError(
+                f"--ref-npys ({len(ref_per_epoch)}) and --npys ({len(frames_raw)}) "
+                "must have the same number of files."
+            )
+        zscores_list = []
+        for i, (ep, m, _, lay) in enumerate(frames_raw):
+            if ref_per_epoch is not None:
+                rm, rs = ref_per_epoch[i]
+            else:
+                rm, rs = ref_mean, ref_std
+            z = (m - rm) / np.maximum(rs, std_floor)
+            zscores_list.append((ep, z, lay))
+        frames = zscores_list
+        vabs = max(max(abs(z).max() for _, z, _ in frames), 1.0)
+        vmin_cka, vmax_cka = -vabs, vabs
+        cmap_main, cbar_label_main = "RdBu_r", f"Z-score (floor={std_floor})"
+        title_type = "Z-score vs ref"
+
+    else:  # cka (default)
+        frames = [(ep, mean, layers) for ep, mean, _, layers in frames_raw]
+        vmin_cka, vmax_cka = 0.0, 1.0   # CKA is always in [0,1]
+        cmap_main, cbar_label_main = "viridis", "Mean CKA"
+        title_type = "Mean CKA"
+
+    fig_size = max(7, n_layers * 0.5)
+    fig, ax_cka = plt.subplots(1, 1, figsize=(fig_size, fig_size * 1.05))
+
+    label = args.label or cfg.experiment
+    ylabel = args.label_a or "Model A"
+    xlabel = args.label_b or "Model B"
+
+    def _setup_ax(ax, title=""):
+        ax.set_xticks(range(n_layers))
+        ax.set_xticklabels(layers, rotation=45, ha="right", fontsize=7)
+        ax.set_yticks(range(n_layers))
+        ax.set_yticklabels(layers, fontsize=7)
+        ax.set_xlabel(xlabel, fontsize=9)
+        ax.set_ylabel(ylabel, fontsize=9)
+        if title:
+            ax.set_title(title, fontsize=9, pad=8)
+
+    # Draw the first frame once to get the AxesImage object,
+    # then update only the data (set_data) in subsequent frames.
+    # This keeps vmin/vmax and the colorbar strictly fixed across all frames.
+    im_cka = ax_cka.imshow(frames[0][1], cmap=cmap_main,
+                            vmin=vmin_cka, vmax=vmax_cka,
+                            origin="lower", aspect="auto")
+    plt.colorbar(im_cka, ax=ax_cka, label=cbar_label_main)
+    _setup_ax(ax_cka)
+    title_obj = ax_cka.set_title(
+        f"{title_type} — {label}  |  Epoch {frames[0][0]}", fontsize=9, pad=8
+    )
+
+    def _draw_frame(frame_idx: int):
+        epoch, matrix, _ = frames[frame_idx]
+        im_cka.set_data(matrix)          # update pixels only, scale unchanged
+        title_obj.set_text(f"{title_type} — {label}  |  Epoch {epoch}")
+        return [im_cka, title_obj]
+
+    # Use explicit margins instead of tight_layout — tight_layout is called
+    # once before animation starts but titles/labels change each frame,
+    # causing clipping. Fixed margins are more reliable for GIF export.
+    fig.subplots_adjust(
+        left=0.12, right=0.97,
+        bottom=0.22,   # room for rotated x-axis labels
+        top=0.90,      # room for title
+        wspace=0.35,   # space between panels (for 2-panel mode)
+    )
+
+    anim = animation.FuncAnimation(
+        fig, _draw_frame, frames=len(frames),
+        interval=args.interval, blit=False,
+    )
+
+    ts = _timestamp()
+    anim_type_tag = getattr(args, "anim_type", "cka")
+    out_path = Path(cfg.results_path()) / f"cka_animation_{anim_type_tag}_{label}_{ts}.gif"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    anim.save(str(out_path), writer="pillow", dpi=args.dpi)
+    plt.close(fig)
+    logger.info("Animation saved: %s  (%d frames, %d ms/frame)",
+                out_path, len(frames), args.interval)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -615,6 +814,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_seed.add_argument("--label", default="multiseed", help="Label used in plot titles and output filenames")
     p_seed.add_argument("--label-a", default=None, help="Label for group A (--ckpts-a) — shown on Y axis (rows)")
     p_seed.add_argument("--label-b", default=None, help="Label for group B (--ckpts-b) — shown on X axis (columns)")
+    p_seed.add_argument(
+        "--filter", default=None,
+        help="Keep only checkpoints whose filename contains this substring. "
+             "Useful when a glob picks up unwanted files, e.g. --filter 'epoch10_C1.2' "
+             "to exclude networks trained with different epochs or C.",
+    )
     p_seed.add_argument(
         "--layers-override", dest="layers_override", default=None,
         help="Comma-separated list of layer names for this specific run, e.g. "
@@ -691,6 +896,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory (default: results/<experiment>/ from config).",
     )
     p_acc.set_defaults(func=cmd_plot_accuracy)
+
+    p_anim = subparsers.add_parser(
+        "animate",
+        help="Animated GIF of CKA heatmaps across epochs from a series of .npy files",
+    )
+    p_anim.add_argument(
+        "--npys", nargs="+", required=True,
+        help="Series of .npy files from multi-seed runs, one per epoch. "
+             "Epoch order is determined from the JSON sidecar or the filename (_epN).",
+    )
+    p_anim.add_argument("--label", default=None,
+                        help="Label shown in the title of each frame.")
+    p_anim.add_argument("--label-a", default=None, help="Y-axis label (rows).")
+    p_anim.add_argument("--label-b", default=None, help="X-axis label (columns).")
+    p_anim.add_argument(
+        "--type", dest="anim_type", default="cka",
+        choices=["cka", "zscore", "std"],
+        help=(
+            "Type of heatmap to animate:\n"
+            "  cka    : mean CKA across pairs (default)\n"
+            "  std    : std of CKA across pairs (inter-seed variability)\n"
+            "  zscore : z-score of CKA vs reference (requires --ref-npys)"
+        ),
+    )
+    p_anim.add_argument(
+        "--ref-npys", nargs="+", default=None,
+        help="Reference .npy files (e.g. baseline-vs-baseline), one per epoch, "
+             "same epochs as --npys. Required for --type zscore.",
+    )
+    p_anim.add_argument(
+        "--std-floor", type=float, default=0.01,
+        help="Minimum std used in z-score denominator (default: 0.01).",
+    )
+    p_anim.add_argument("--interval", type=int, default=400,
+                        help="Delay between frames in milliseconds (default: 400).")
+    p_anim.add_argument("--dpi", type=int, default=100,
+                        help="Resolution of the GIF (default: 100).")
+    p_anim.set_defaults(func=cmd_animate)
 
     return parser
 

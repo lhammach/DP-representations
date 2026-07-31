@@ -2,6 +2,13 @@
 training.py
 ===========
 Training loops (baseline and DP-SGD via Opacus) and evaluation.
+
+Gradient statistics are NOT computed here anymore. They are computed
+a posteriori by compute_grad_stats.py, which loads a checkpoint and
+runs a clean backward pass on the full training set — independently
+of Opacus. This avoids all the complexity and memory overhead of
+reading grad_sample during training (virtual steps, grad_sample
+lifetime, OnlineGradStats RAM cost, etc.).
 """
 
 from __future__ import annotations
@@ -36,20 +43,10 @@ def build_optimizer(
 
     Supported values: "sgd", "adam", "rmsprop".
 
-    Why SGD for DP-SGD?
-    The DP-SGD literature consistently uses SGD with momentum as the base
-    optimizer. The noise injected by DP-SGD is additive Gaussian on each
-    gradient — this is theoretically well-understood for SGD. Adaptive
-    optimizers (Adam, RMSprop) maintain running statistics of gradient
-    variance that get corrupted by DP noise, making their updates less
-    principled (hence the dedicated DP-Adam / DP-AdamBC variants in the
-    literature). SGD with momentum is therefore the safest default for
-    comparing DP vs non-DP representations, and should be tried first.
-
-    Recommended starting points:
-    - SGD   : lr=0.1, momentum=0.9  (classic for CIFAR-10)
+    Recommended starting points for DP-SGD on CIFAR-10:
+    - SGD   : lr=0.1, momentum=0.9  (classic, theoretically well-understood with DP)
     - Adam  : lr=1e-3
-    - RMSprop: lr=1e-3 (original notebook default, generally worse for DP)
+    - RMSprop: lr=1e-3 (generally worse for DP due to adaptive stat corruption by noise)
     """
     name = optimizer.lower().strip()
     if name == "sgd":
@@ -78,14 +75,6 @@ def build_scheduler(
         scheduler: "none" (constant LR) or "cosine" (CosineAnnealingLR).
         epochs: total number of training epochs — used as T_max for cosine.
         lr_min: minimum LR at the end of cosine annealing (eta_min).
-
-    Why cosine annealing works well with DP-SGD:
-        DP-SGD adds Gaussian noise to every gradient update, so the effective
-        signal-to-noise ratio is low throughout training. A high LR early on
-        lets the model explore despite the noise; decaying to a small LR near
-        the end lets it converge stably without being thrown off by gradient
-        noise. CosineAnnealingLR does this smoothly (no abrupt step drops
-        that can cause instability).
     """
     name = scheduler.lower().strip()
     if name == "none":
@@ -96,8 +85,6 @@ def build_scheduler(
         return sched
     else:
         raise ValueError(f"Unknown scheduler '{scheduler}'. Choose from: none, cosine.")
-    preds = logits.argmax(dim=1)
-    return (preds == labels).float().mean().item()
 
 
 def train_one_epoch_baseline(
@@ -107,7 +94,7 @@ def train_one_epoch_baseline(
     epoch: int,
     device: torch.device,
 ) -> float:
-    """One epoch of standard (non-DP) training. Returns the mean train accuracy."""
+    """One epoch of standard (non-DP) training. Returns mean train accuracy."""
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses, accs = [], []
@@ -116,20 +103,18 @@ def train_one_epoch_baseline(
     for images, target in progress:
         images, target = images.to(device), target.to(device)
         optimizer.zero_grad()
-
         output = model(images)
         loss = criterion(output, target)
         acc = accuracy_from_logits(output, target)
-
         loss.backward()
         optimizer.step()
-
         losses.append(loss.item())
         accs.append(acc)
         progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc * 100:.1f}%")
 
     mean_acc = float(np.mean(accs))
-    logger.info("[Baseline] Epoch %d | Loss: %.4f | Train Acc: %.2f%%", epoch, np.mean(losses), mean_acc * 100)
+    logger.info("[Baseline] Epoch %d | Loss: %.4f | Train Acc: %.2f%%",
+                epoch, np.mean(losses), mean_acc * 100)
     return mean_acc
 
 
@@ -157,14 +142,11 @@ def train_one_epoch_dp(
         for images, target in progress:
             images, target = images.to(device), target.to(device)
             optimizer.zero_grad()
-
             output = model(images)
             loss = criterion(output, target)
             acc = accuracy_from_logits(output, target)
-
             loss.backward()
             optimizer.step()
-
             losses.append(loss.item())
             accs.append(acc)
             progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc * 100:.1f}%")
@@ -212,7 +194,6 @@ def make_private(
 ) -> tuple[nn.Module, optim.Optimizer, DataLoader, PrivacyEngine]:
     """Wrap model/optimizer/dataloader with Opacus for DP-SGD."""
     privacy_engine = PrivacyEngine(accountant=accountant)
-
     dp_model, dp_optimizer, dp_loader = privacy_engine.make_private_with_epsilon(
         module=model,
         optimizer=optimizer,
@@ -236,25 +217,11 @@ def make_private_ablation(
 ) -> tuple[nn.Module, optim.Optimizer, DataLoader, PrivacyEngine]:
     """Wrap model/optimizer/dataloader with Opacus for ablation studies.
 
-    Unlike `make_private`, this function takes `noise_multiplier` and
-    `max_grad_norm` directly instead of deriving them from a target epsilon.
-    This lets you independently disable clipping (very large max_grad_norm)
-    or noise (noise_multiplier=0.0) while keeping the other mechanism.
-
-    Note: with noise_multiplier=0 there is no privacy guarantee (epsilon=inf),
-    which is the point of the "no noise" ablation — it isolates the effect of
-    gradient clipping alone on representations.
-
-    Args:
-        noise_multiplier: std of the Gaussian noise added to each gradient.
-            Set to 0.0 to disable noise (clipping-only ablation).
-        max_grad_norm: per-sample gradient clipping bound.
-            Set to a very large value (e.g. 1e6) to effectively disable
-            clipping (noise-only ablation). Note that with no clipping and
-            no noise you get standard SGD, not a meaningful DP ablation.
+    Takes noise_multiplier and max_grad_norm directly instead of deriving
+    them from a target epsilon. Use noise_multiplier=0.0 for clipping-only
+    ablation, or max_grad_norm=1e6 for noise-only ablation.
     """
     privacy_engine = PrivacyEngine(accountant=accountant)
-
     dp_model, dp_optimizer, dp_loader = privacy_engine.make_private(
         module=model,
         optimizer=optimizer,
@@ -262,10 +229,8 @@ def make_private_ablation(
         noise_multiplier=noise_multiplier,
         max_grad_norm=max_grad_norm,
     )
-    logger.info(
-        "Ablation mode: noise_multiplier=%.4f, max_grad_norm=%.2f",
-        noise_multiplier, max_grad_norm,
-    )
+    logger.info("Ablation mode: noise_multiplier=%.4f, max_grad_norm=%.2f",
+                noise_multiplier, max_grad_norm)
     return dp_model, dp_optimizer, dp_loader, privacy_engine
 
 
@@ -276,18 +241,10 @@ def unwrap_state_dict(model: nn.Module) -> dict[str, Any]:
 
 
 def apply_fsdp_compat_patch() -> None:
-    """Temporary compatibility patch for some torch/Opacus version mismatches.
-
-    Some Opacus versions check for the existence of
-    `torch.distributed.fsdp.FSDPModule`, which may be absent in some torch
-    versions. This patch adds a dummy class if needed, only to satisfy this
-    import check — it does not affect standard (non-distributed) DP-SGD
-    training used here.
-    """
+    """Temporary compatibility patch for some torch/Opacus version mismatches."""
     if hasattr(torch, "distributed") and hasattr(torch.distributed, "fsdp"):
         if not hasattr(torch.distributed.fsdp, "FSDPModule"):
             class _DummyFSDPModule:
                 pass
-
             torch.distributed.fsdp.FSDPModule = _DummyFSDPModule
             logger.debug("FSDP compatibility patch applied.")

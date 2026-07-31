@@ -41,6 +41,8 @@ def make_run_id(
     optimizer: str | None = None,
     cifar_stem: bool = False,
     lr_scheduler: str | None = None,
+    batch_size: int | None = None,
+    model_name: str | None = None,
     timestamp: str | None = None,
 ) -> str:
     """Build the run identifier used to name checkpoints and logs."""
@@ -48,7 +50,15 @@ def make_run_id(
     delta_str = _format_delta(delta)
     eps_str = epsilon if isinstance(epsilon, str) else f"{epsilon:g}"
 
-    parts = [f"{prefix}_eps{eps_str}_delta{delta_str}_epoch{epochs}_C{max_grad_norm}"]
+    # prefix already encodes run_type (baseline_resnet18, dp_resnet18, etc.)
+    # We add model_name only if it's not the default resnet18
+    model_tag = ""
+    if model_name and model_name.lower() not in ("resnet18", ""):
+        model_tag = "_" + model_name.replace("-", "").replace("_", "")
+
+    parts = [f"{prefix}{model_tag}_eps{eps_str}_delta{delta_str}_epoch{epochs}_C{max_grad_norm}"]
+    if batch_size is not None:
+        parts.append(f"B{batch_size}")
     if lr is not None:
         parts.append(f"LR{lr:g}")
     if optimizer is not None and optimizer != "sgd":
@@ -74,13 +84,18 @@ def get_checkpoint_path(
     optimizer: str | None = None,
     cifar_stem: bool = False,
     lr_scheduler: str | None = None,
+    batch_size: int | None = None,
+    model_name: str | None = None,
     ext: str = "pth",
     timestamp: str | None = None,
 ) -> Path:
     """Generate a unique checkpoint path (timestamp included, so never a collision)."""
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
-    run_id = make_run_id(prefix, epsilon, delta, epochs, max_grad_norm, seed, lr, optimizer, cifar_stem, lr_scheduler, timestamp)
+    run_id = make_run_id(
+        prefix, epsilon, delta, epochs, max_grad_norm, seed,
+        lr, optimizer, cifar_stem, lr_scheduler, batch_size, model_name, timestamp,
+    )
     return save_dir / f"{run_id}.{ext}"
 
 
@@ -107,6 +122,55 @@ def save_checkpoint(path: str | Path, payload: dict[str, Any], extra_metadata: d
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2, default=str)
     logger.info("Metadata saved: %s", meta_path)
+
+
+def save_intermediate_checkpoint(
+    base_path: Path,
+    epoch: int,
+    model_state_dict: dict,
+    payload: dict[str, Any],
+    milestones: tuple[int, ...] = (50, 100, 150, 200),
+) -> Path | None:
+    """Save a checkpoint at training milestones (every N epochs).
+
+    Called inside the training loop at every epoch. Only saves when `epoch`
+    is in `milestones`. The saved file is named after the base checkpoint
+    but with `_ep{epoch}` inserted before the timestamp, making it clear
+    that it belongs to the same run at an earlier point in training.
+
+    Example — for a base path:
+        dp_resnet18_eps10_..._seed1_20260707-120000.pth
+
+    Intermediate checkpoints at epoch 50 and 100 will be:
+        dp_resnet18_eps10_..._seed1_20260707-120000_ep50.pth
+        dp_resnet18_eps10_..._seed1_20260707-120000_ep100.pth
+
+    Args:
+        base_path: the final checkpoint path (used to derive intermediate names).
+        epoch: current epoch (1-indexed).
+        model_state_dict: state dict at this epoch.
+        payload: full training payload (same structure as save_checkpoint).
+            The "epoch" key will be overwritten with the current epoch.
+        milestones: epochs at which to save. Default: 50, 100, 150, 200.
+
+    Returns:
+        The path of the saved intermediate checkpoint, or None if this epoch
+        is not a milestone.
+    """
+    if epoch not in milestones:
+        return None
+
+    stem = base_path.stem   # e.g. "dp_resnet18_eps10_..._seed1_20260707-120000"
+    inter_name = f"{stem}_ep{epoch}{base_path.suffix}"
+    inter_path = base_path.parent / inter_name
+
+    inter_payload = {**payload, "epoch": epoch, "model_state_dict": model_state_dict}
+    save_checkpoint(
+        inter_path,
+        payload=inter_payload,
+        extra_metadata={"intermediate_checkpoint": True, "saved_at_epoch": epoch},
+    )
+    return inter_path
 
 
 def load_checkpoint(path: str | Path, map_location: str = "cpu") -> dict[str, Any]:

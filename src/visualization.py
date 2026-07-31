@@ -249,24 +249,16 @@ def plot_zscore_heatmap(
     std_floor: float = 0.01,
     save_path: str | Path | None = None,
 ) -> np.ndarray:
-    """Three-panel plot: target CKA | reference mean CKA | z-score (target vs reference).
+    """Four-panel plot:
+        1. Target CKA (e.g. DP vs Baseline)
+        2. Reference mean CKA (e.g. Baseline vs Baseline)
+        3. Reference std CKA (inter-seed variability of the reference)
+        4. Z-score with annotated values
 
-    The z-score answers "where does target CKA deviate significantly from
-    the reference baseline variability?" for every (layer_i, layer_j) pair,
-    including off-diagonal blocks.
+    Z-score formula per cell (i,j):
+        z(i,j) = (CKA_target(i,j) - mean_ref(i,j)) / max(std_ref(i,j), std_floor)
 
-    Args:
-        mean_matrix_target: (n_layers, n_layers) mean CKA for the comparison
-            of interest (e.g. DP vs baseline).
-        mean_matrix_ref: (n_layers, n_layers) mean CKA from the reference
-            distribution (e.g. baseline vs baseline across seeds).
-        std_matrix_ref: (n_layers, n_layers) std of the reference distribution.
-        std_floor: minimum std applied to every cell before dividing, to avoid
-            artificially inflating z-scores in cells where the reference is
-            nearly constant (e.g. very dissimilar cross-layer pairs that are
-            always ~0 with tiny variance).
-        ylabel: label for the Y axis (rows) — typically the "A" group.
-        xlabel: label for the X axis (columns) — typically the "B" group.
+    std_floor avoids inflating z-scores where the reference has near-zero variance.
 
     Returns:
         zscore_matrix: (n_layers, n_layers) array of z-scores.
@@ -274,39 +266,55 @@ def plot_zscore_heatmap(
     std_safe = np.maximum(std_matrix_ref, std_floor)
     zscore = (mean_matrix_target - mean_matrix_ref) / std_safe
     num_layers = len(layers)
-    fig_size = max(8, num_layers * 0.4)
+    fig_size = max(6, num_layers * 0.45)
 
-    fig, axes = plt.subplots(1, 3, figsize=(fig_size * 3, fig_size * 0.85))
+    fig, axes = plt.subplots(1, 4, figsize=(fig_size * 4, fig_size * 0.95))
 
-    # Panel 1 : target (e.g. DP vs baseline)
-    ax = axes[0]
-    im = ax.imshow(mean_matrix_target, cmap="viridis", vmin=0, vmax=1, origin="lower")
-    plt.colorbar(im, ax=ax, label="CKA")
-    ax.set_xticks(range(num_layers)); ax.set_xticklabels(layers, rotation=90, fontsize=7)
-    ax.set_yticks(range(num_layers)); ax.set_yticklabels(layers, fontsize=7)
-    ax.set_xlabel(xlabel, fontsize=9); ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_title("Target: " + (title or "DP vs Baseline"))
+    def _setup(ax, mat, cmap, vmin, vmax, title_ax, xl, yl, cbar_label):
+        im = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower")
+        plt.colorbar(im, ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
+        ax.set_xticks(range(num_layers))
+        ax.set_xticklabels(layers, rotation=90, fontsize=6)
+        ax.set_yticks(range(num_layers))
+        ax.set_yticklabels(layers, fontsize=6)
+        ax.set_xlabel(xl, fontsize=8)
+        ax.set_ylabel(yl, fontsize=8)
+        ax.set_title(title_ax, fontsize=8, pad=6)
+        return im
 
-    # Panel 2 : reference mean (e.g. baseline vs baseline)
-    ax = axes[1]
-    im = ax.imshow(mean_matrix_ref, cmap="viridis", vmin=0, vmax=1, origin="lower")
-    plt.colorbar(im, ax=ax, label="CKA")
-    ax.set_xticks(range(num_layers)); ax.set_xticklabels(layers, rotation=90, fontsize=7)
-    ax.set_yticks(range(num_layers)); ax.set_yticklabels(layers, fontsize=7)
-    ax.set_xlabel("Baseline (columns)", fontsize=9); ax.set_ylabel("Baseline (rows)", fontsize=9)
-    ax.set_title("Reference mean: Baseline vs Baseline")
+    # Panel 1: target CKA
+    _setup(axes[0], mean_matrix_target, "viridis", 0, 1,
+           f"Target CKA\n{ylabel} vs {xlabel}",
+           xlabel, ylabel, "Mean CKA")
 
-    # Panel 3 : z-score (symmetric colormap centered on 0)
-    ax = axes[2]
+    # Panel 2: reference mean CKA
+    _setup(axes[1], mean_matrix_ref, "viridis", 0, 1,
+           "Reference mean CKA\n(Baseline vs Baseline)",
+           "Baseline", "Baseline", "Mean CKA")
+
+    # Panel 3: reference std CKA
+    std_vmax = max(std_matrix_ref.max(), 1e-3)
+    _setup(axes[2], std_matrix_ref, "magma", 0, std_vmax,
+           f"Reference std CKA\n(inter-seed variability, floor={std_floor})",
+           "Baseline", "Baseline", "Std CKA")
+
+    # Panel 4: z-score with annotated values
     vabs = max(abs(zscore.min()), abs(zscore.max()), 1.0)
-    im = ax.imshow(zscore, cmap="RdBu_r", vmin=-vabs, vmax=vabs, origin="lower")
-    plt.colorbar(im, ax=ax, label="z-score")
-    ax.set_xticks(range(num_layers)); ax.set_xticklabels(layers, rotation=90, fontsize=7)
-    ax.set_yticks(range(num_layers)); ax.set_yticklabels(layers, fontsize=7)
-    ax.set_xlabel(xlabel, fontsize=9); ax.set_ylabel(ylabel, fontsize=9)
-    ax.set_title(f"Z-score (std floor={std_floor})\nBlue=below ref, Red=above ref")
+    _setup(axes[3], zscore, "RdBu_r", -vabs, vabs,
+           f"Z-score\nBlue = below ref  |  Red = above ref",
+           xlabel, ylabel, "Z-score")
 
-    plt.suptitle(title, fontsize=11, y=1.01)
+    # Annotate z-score values
+    thresh = vabs * 0.4   # use white text on strongly colored cells
+    for i in range(num_layers):
+        for j in range(num_layers):
+            v = zscore[i, j]
+            color = "white" if abs(v) > thresh else "black"
+            axes[3].text(j, i, f"{v:.1f}", ha="center", va="center",
+                         fontsize=max(3, 6 - num_layers // 5),
+                         color=color, fontweight="bold")
+
+    plt.suptitle(title, fontsize=10, y=1.01)
     plt.tight_layout()
     _save_or_show(save_path)
     return zscore

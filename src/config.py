@@ -37,8 +37,10 @@ class Config:
     optimizer: str = "sgd"       # "sgd" | "adam" | "rmsprop"
     momentum: float = 0.9        # used only with sgd
     cifar_stem: bool = False     # True = 3x3 conv stem adapted for 32x32 CIFAR-10 images
+    model: str = "resnet18"      # "resnet18" | "wideresnet-16-4" | "wideresnet-16-8" | "wideresnet-40-4"
     lr_scheduler: str = "none"   # "none" | "cosine"
     lr_min: float = 1e-4         # minimum LR for cosine annealing (ignored if lr_scheduler="none")
+    checkpoint_every: int = 0    # save intermediate checkpoint every N epochs (0 = disabled)
 
     # --- DP-SGD hyperparameters ---
     epsilon: float = 10.0
