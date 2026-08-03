@@ -93,8 +93,12 @@ def train_one_epoch_baseline(
     optimizer: optim.Optimizer,
     epoch: int,
     device: torch.device,
-) -> float:
-    """One epoch of standard (non-DP) training. Returns mean train accuracy."""
+) -> tuple[float, float]:
+    """One epoch of standard (non-DP) training.
+
+    Returns:
+        (mean_train_accuracy, mean_train_loss)
+    """
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses, accs = [], []
@@ -113,7 +117,73 @@ def train_one_epoch_baseline(
         progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc * 100:.1f}%")
 
     mean_acc = float(np.mean(accs))
+    mean_loss = float(np.mean(losses))
     logger.info("[Baseline] Epoch %d | Loss: %.4f | Train Acc: %.2f%%",
+                epoch, mean_loss, mean_acc * 100)
+    return mean_acc, mean_loss
+
+
+def train_one_epoch_no_clip(
+    model: nn.Module,
+    train_loader: DataLoader,
+    optimizer: optim.Optimizer,
+    epoch: int,
+    device: torch.device,
+    noise_multiplier: float,
+    max_grad_norm: float,
+) -> float:
+    """One epoch of noise-only training (no gradient clipping).
+
+    This is the clean implementation of the --no-clip ablation:
+    - Standard backward pass on the full batch (no Opacus, no per-sample grads)
+    - After loss.backward(), gradients are the mean over the batch: g = (1/B) sum g^(i)
+    - We add Gaussian noise scaled to sigma * C (identical noise level to full DP)
+    - No clipping is applied
+
+    Effective update:
+        g_noisy = g + N(0, sigma^2 * C^2 / B^2 * I)
+
+    Note: the noise variance is divided by B^2 because param.grad already
+    contains the mean gradient (sum / B), so we add noise std = sigma*C/B
+    to match the DP-SGD formula where noise is added to the sum then divided by B.
+
+    Args:
+        noise_multiplier: sigma (same as the full DP run)
+        max_grad_norm: C (same as the full DP run)
+    """
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    losses, accs = [], []
+    noise_std = noise_multiplier * max_grad_norm  # sigma * C (for the sum)
+
+    progress = tqdm(train_loader, desc=f"NoClip epoch {epoch}", unit="batch", leave=False)
+    for images, target in progress:
+        images, target = images.to(device), target.to(device)
+        B = images.shape[0]
+        optimizer.zero_grad()
+        output = model(images)
+        loss = criterion(output, target)
+        acc = accuracy_from_logits(output, target)
+        loss.backward()
+
+        # Add DP noise to each parameter gradient.
+        # param.grad = (1/B) * sum_i g^(i)  (PyTorch averages by default)
+        # In DP-SGD: g_dp = (1/B) * (sum_i clip(g^(i)) + N(0, sigma^2*C^2*I))
+        # Here:      g_dp = (1/B) * (sum_i g^(i)        + N(0, sigma^2*C^2*I))
+        # So we add N(0, (sigma*C/B)^2 * I) to param.grad (which is already /B)
+        with torch.no_grad():
+            for param in model.parameters():
+                if param.grad is not None:
+                    noise = torch.randn_like(param.grad) * (noise_std / B)
+                    param.grad.add_(noise)
+
+        optimizer.step()
+        losses.append(loss.item())
+        accs.append(acc)
+        progress.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc * 100:.1f}%")
+
+    mean_acc = float(np.mean(accs))
+    logger.info("[NoClip] Epoch %d | Loss: %.4f | Train Acc: %.2f%%",
                 epoch, np.mean(losses), mean_acc * 100)
     return mean_acc
 
@@ -127,8 +197,12 @@ def train_one_epoch_dp(
     privacy_engine: PrivacyEngine,
     max_physical_batch_size: int,
     delta: float,
-) -> tuple[float, float]:
-    """One epoch of DP-SGD training. Returns (mean train accuracy, current epsilon)."""
+) -> tuple[float, float, float]:
+    """One epoch of DP-SGD training.
+
+    Returns:
+        (mean_train_accuracy, current_epsilon, mean_train_loss)
+    """
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses, accs = [], []
@@ -153,11 +227,12 @@ def train_one_epoch_dp(
 
     epsilon = privacy_engine.get_epsilon(delta)
     mean_acc = float(np.mean(accs))
+    mean_loss = float(np.mean(losses))
     logger.info(
         "[DP] Epoch %d | Loss: %.4f | Train Acc: %.2f%% | (ε = %.2f, δ = %.2e)",
-        epoch, np.mean(losses), mean_acc * 100, epsilon, delta,
+        epoch, mean_loss, mean_acc * 100, epsilon, delta,
     )
-    return mean_acc, epsilon
+    return mean_acc, epsilon, mean_loss
 
 
 @torch.no_grad()

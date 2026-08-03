@@ -105,6 +105,11 @@ def save_checkpoint(path: str | Path, payload: dict[str, Any], extra_metadata: d
     The .json does NOT contain the weights (only scalars/lists/histories),
     which lets you browse all past runs (e.g. comparing epsilons) without
     loading every .pth into memory.
+
+    The 'model' key is always included in the JSON (inferred from the filename
+    if not present in payload), so that load_model_from_checkpoint and
+    compute_grad_stats.py can reconstruct the correct architecture without
+    requiring a manual patch step.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +122,27 @@ def save_checkpoint(path: str | Path, payload: dict[str, Any], extra_metadata: d
         meta.update(extra_metadata)
     meta["checkpoint_file"] = path.name
     meta["saved_at"] = datetime.now().isoformat(timespec="seconds")
+
+    # Ensure 'model' is always present in the JSON.
+    # If the payload doesn't have it, infer from the filename:
+    # e.g. "baseline_wideresnet164_..." → "wideresnet-16-4"
+    #      "dp_vits_..."               → "vit-s"
+    #      "baseline_resnet18_..."     → "resnet18"
+    if "model" not in meta:
+        name = path.stem.lower()
+        if "wideresnet164" in name:
+            meta["model"] = "wideresnet-16-4"
+        elif "wideresnet168" in name:
+            meta["model"] = "wideresnet-16-8"
+        elif "wideresnet404" in name:
+            meta["model"] = "wideresnet-40-4"
+        elif "vits" in name:
+            meta["model"] = "vit-s"
+        elif "vitt" in name:
+            meta["model"] = "vit-t"
+        else:
+            meta["model"] = "resnet18"
+        logger.debug("model not in payload — inferred from filename: %s", meta["model"])
 
     meta_path = path.with_suffix(".json")
     with open(meta_path, "w") as f:

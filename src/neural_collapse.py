@@ -92,55 +92,105 @@ def extract_penultimate(
     loader: torch.utils.data.DataLoader,
     device: torch.device,
     num_classes: int = 10,
+    layer_index: int = -1,
+    correct_only: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Extract penultimate-layer features (before the classification head).
+    """Extract features from a chosen Linear layer.
 
-    Returns:
-        features : (N, d) array of representations
-        labels   : (N,)  array of true class labels
+    Args:
+        layer_index: which Linear layer to hook, counting from the end.
+            -1 = last Linear (penultimate representation, default)
+            -2 = second-to-last Linear
+        correct_only: if True, only keep examples the model classifies
+            correctly. Gives a cleaner NC signal at the cost of excluding
+            misclassified examples (whose representations pull class means
+            away from the true geometry). The original Papyan paper uses
+            all training examples; correct_only is an optional refinement.
     """
     model.eval()
-    features_list: list[torch.Tensor] = []
+    captured: list[torch.Tensor] = []
     labels_list: list[torch.Tensor] = []
+    preds_list: list[torch.Tensor] = []
 
-    # Hook to capture the penultimate layer output.
-    # We hook the layer just before the final Linear classifier.
-    # For ResNet18: average-pooled features before fc (shape: B × 512)
-    # For WideResNet: features before linear (shape: B × 256)
-    # For ViT: CLS token after transformer, before mlp_head (shape: B × 512)
-    penultimate: list[torch.Tensor] = []
+    linear_layers: list[nn.Linear] = [
+        m for m in model.modules() if isinstance(m, nn.Linear)
+    ]
+    if not linear_layers:
+        raise RuntimeError("No nn.Linear found in model.")
+
+    chosen = linear_layers[layer_index]
+    logger.info("Hooking Linear layer at index %d (out=%d, in=%d)%s",
+                layer_index, chosen.out_features, chosen.in_features,
+                " [correct-only]" if correct_only else "")
 
     def _hook(module, input, output):
-        # For ResNet18: input to fc is the flattened feature
-        penultimate.append(input[0].detach().cpu())
+        captured.append(input[0].detach().cpu())
 
-    # Find the last Linear layer and register hook on it
-    last_linear: nn.Linear | None = None
-    for module in model.modules():
-        if isinstance(module, nn.Linear):
-            last_linear = module
-    if last_linear is None:
-        raise RuntimeError("No nn.Linear found in model.")
-    handle = last_linear.register_forward_hook(_hook)
+    handle = chosen.register_forward_hook(_hook)
 
     with torch.no_grad():
         for images, targets in tqdm(loader, desc="Extracting features", leave=False):
             images = images.to(device)
-            model(images)
+            logits = model(images)
+            preds_list.append(logits.argmax(dim=1).cpu())
             labels_list.append(targets)
 
     handle.remove()
 
-    features = torch.cat(penultimate, dim=0).numpy()   # (N, d)
-    labels = torch.cat(labels_list, dim=0).numpy()     # (N,)
-    logger.info("Extracted features: shape=%s, classes=%d",
-                features.shape, len(np.unique(labels)))
+    features = torch.cat(captured, dim=0).numpy()
+    labels = torch.cat(labels_list, dim=0).numpy()
+    preds = torch.cat(preds_list, dim=0).numpy()
+
+    if correct_only:
+        mask = (preds == labels)
+        n_total = len(labels)
+        n_correct = int(mask.sum())
+        features = features[mask]
+        labels = labels[mask]
+        logger.info("correct_only: %d/%d examples kept (%.1f%%)",
+                    n_correct, n_total, 100 * n_correct / n_total)
+
+    logger.info("Extracted features: shape=%s", features.shape)
     return features, labels
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NC metrics
-# ─────────────────────────────────────────────────────────────────────────────
+def log_per_class_accuracy(
+    features: np.ndarray,
+    labels: np.ndarray,
+    W: np.ndarray,
+    num_classes: int,
+    class_names: list[str] | None = None,
+) -> dict[int, dict]:
+    """Compute and log per-class accuracy + number of correctly classified examples.
+
+    Uses the classifier weight matrix W to predict classes (argmax of W @ h).
+    Returns a dict {class_id: {n_total, n_correct, accuracy}}.
+    """
+    logits = features @ W.T        # (N, C)
+    preds = np.argmax(logits, axis=1)
+
+    names = class_names or [str(c) for c in range(num_classes)]
+    per_class: dict[int, dict] = {}
+
+    logger.info("Per-class accuracy:")
+    logger.info("  %-12s  %6s  %7s  %8s", "Class", "Total", "Correct", "Accuracy")
+    logger.info("  " + "-" * 38)
+
+    for c in range(num_classes):
+        mask_c = labels == c
+        n_total = int(mask_c.sum())
+        n_correct = int(((preds == c) & mask_c).sum())
+        acc = n_correct / n_total if n_total > 0 else 0.0
+        per_class[c] = {"class": names[c], "n_total": n_total,
+                        "n_correct": n_correct, "accuracy": acc}
+        logger.info("  %-12s  %6d  %7d  %7.1f%%",
+                    names[c], n_total, n_correct, 100 * acc)
+
+    overall = int((preds == labels).sum())
+    logger.info("  " + "-" * 38)
+    logger.info("  %-12s  %6d  %7d  %7.1f%%",
+                "TOTAL", len(labels), overall, 100 * overall / len(labels))
+    return per_class
 
 def compute_nc_metrics(
     features: np.ndarray,
@@ -289,6 +339,7 @@ def plot_nc_bars(
     labels: list[str],
     out_dir: Path,
     title: str = "",
+    model_tag: str = "",
 ) -> None:
     """Bar chart comparing NC1–NC4 across multiple checkpoints."""
     metrics = ["nc1", "nc2", "nc3", "nc4"]
@@ -318,7 +369,8 @@ def plot_nc_bars(
 
     plt.suptitle(title or "Neural Collapse metrics", fontsize=11, y=1.01)
     plt.tight_layout()
-    _save(fig, out_dir / f"nc_bars_{_ts()}.png")
+    tag = f"_{model_tag}" if model_tag else ""
+    _save(fig, out_dir / f"nc_bars{tag}_{_ts()}.png")
 
 
 def plot_nc_over_epochs(
@@ -327,6 +379,7 @@ def plot_nc_over_epochs(
     epochs: list[list[int]],
     out_dir: Path,
     title: str = "",
+    model_tag: str = "",
 ) -> None:
     """Line plot of NC1–NC4 over training epochs for multiple groups."""
     metrics = ["nc1", "nc2", "nc3", "nc4"]
@@ -355,7 +408,8 @@ def plot_nc_over_epochs(
 
     plt.suptitle(title or "Neural Collapse over training epochs", fontsize=12)
     plt.tight_layout()
-    _save(fig, out_dir / f"nc_over_epochs_{_ts()}.png")
+    tag = f"_{model_tag}" if model_tag else ""
+    _save(fig, out_dir / f"nc_over_epochs{tag}_{_ts()}.png")
 
 
 def plot_nc2_cosines(
@@ -364,6 +418,7 @@ def plot_nc2_cosines(
     out_dir: Path,
     num_classes: int = 10,
     title: str = "",
+    model_tag: str = "",
 ) -> None:
     """Boxplot of off-diagonal cosines between class means (NC2 detail)."""
     # We need to re-run for the cosine distributions — store them during compute
@@ -387,7 +442,8 @@ def plot_nc2_cosines(
     ax.legend(fontsize=9)
     ax.grid(True, linestyle="--", alpha=0.4, axis="y")
     plt.tight_layout()
-    _save(fig, out_dir / f"nc2_cosines_{_ts()}.png")
+    tag = f"_{model_tag}" if model_tag else ""
+    _save(fig, out_dir / f"nc2_cosines{tag}_{_ts()}.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,6 +488,28 @@ def main() -> None:
         help="Dataset split to use (default: train, as in the original paper).",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--layer-index", type=int, default=-1,
+        help=(
+            "Which Linear layer to hook for feature extraction, counting from the end. "
+            "-1 (default) = last Linear = penultimate representation (just before classifier). "
+            "-2 = second-to-last Linear (one layer earlier). "
+            "For ResNet18: -1 = fc (512→10). "
+            "For WideResNet: -1 = linear (256→10). "
+            "For ViT-S: -1 = mlp_head.1 (512→10), -2 = mlp_head SPT linear (240→512)."
+        ),
+    )
+    parser.add_argument(
+        "--class-names", nargs="+", default=None,
+        help="Class names in label order (default: CIFAR-10 names). "
+             "E.g. --class-names airplane automobile bird cat deer dog frog horse ship truck",
+    )
+    parser.add_argument(
+        "--correct-only", action="store_true",
+        help="Only use correctly classified examples for NC metrics. "
+             "Gives a cleaner signal but excludes misclassified examples. "
+             "Default: use all examples (as in the original Papyan paper).",
+    )
     parser.add_argument("--title", default="")
 
     args = parser.parse_args()
@@ -460,10 +538,24 @@ def main() -> None:
     for ckpt_path in args.ckpt:
         logger.info("=== %s ===", Path(ckpt_path).name)
         model, W, b, epoch = _load_model_and_head(ckpt_path, args.num_classes, device)
-        features, labels = extract_penultimate(model, loader, device, args.num_classes)
-        metrics = compute_nc_metrics(features, labels, W, b, args.num_classes)
+        features, labels_arr = extract_penultimate(
+            model, loader, device, args.num_classes,
+            layer_index=args.layer_index,
+            correct_only=args.correct_only,
+        )
+        metrics = compute_nc_metrics(features, labels_arr, W, b, args.num_classes)
         metrics["epoch"] = epoch
         metrics["checkpoint"] = str(ckpt_path)
+
+        # Per-class accuracy (always computed, logged when --correct-only or --verbose)
+        class_names = args.class_names or [
+            "airplane", "automobile", "bird", "cat", "deer",
+            "dog", "frog", "horse", "ship", "truck"
+        ][:args.num_classes]
+        per_class = log_per_class_accuracy(
+            features, labels_arr, W, args.num_classes, class_names
+        )
+        metrics["per_class_accuracy"] = per_class
         all_results.append(metrics)
         all_epochs.append(epoch)
         auto_labels.append(Path(ckpt_path).stem[:40])
@@ -474,16 +566,27 @@ def main() -> None:
 
     labels = args.labels or auto_labels
 
+    # Infer model name from first checkpoint JSON
+    first_json = Path(args.ckpt[0]).with_suffix(".json")
+    model_tag = "unknown"
+    if first_json.exists():
+        with open(first_json) as f:
+            model_tag = json.load(f).get("model", "unknown")
+    if args.layer_index != -1:
+        model_tag = f"{model_tag}_layer{args.layer_index}"
+    if args.correct_only:
+        model_tag = f"{model_tag}_correctonly"
+
     # Save JSON
-    json_out = out_dir / f"nc_metrics_{_ts()}.json"
+    json_out = out_dir / f"nc_metrics_{model_tag}_{_ts()}.json"
     with open(json_out, "w") as f:
-        json.dump({"results": all_results, "labels": labels}, f, indent=2)
+        json.dump({"results": all_results, "labels": labels,
+                   "model": model_tag}, f, indent=2)
     logger.info("Metrics saved: %s", json_out)
 
-    title = args.title or f"Neural Collapse — {args.experiment}"
+    title = args.title or f"Neural Collapse — {args.experiment} ({model_tag})"
 
     if args.plot_over_epochs and args.group_labels and args.group_sizes:
-        # Multi-group over-epoch plot
         groups: list[list[dict]] = []
         group_epochs: list[list[int]] = []
         idx = 0
@@ -491,17 +594,15 @@ def main() -> None:
             groups.append(all_results[idx:idx+size])
             group_epochs.append(all_epochs[idx:idx+size])
             idx += size
-        plot_nc_over_epochs(groups, args.group_labels, group_epochs, out_dir, title)
-
+        plot_nc_over_epochs(groups, args.group_labels, group_epochs,
+                            out_dir, title, model_tag)
     elif args.plot_over_epochs:
-        # Single group over-epoch
         plot_nc_over_epochs([all_results], [args.experiment], [all_epochs],
-                            out_dir, title)
-
+                            out_dir, title, model_tag)
     else:
-        # Bar chart comparison
-        plot_nc_bars(all_results, labels, out_dir, title)
-        plot_nc2_cosines(all_results, labels, out_dir, args.num_classes, title)
+        plot_nc_bars(all_results, labels, out_dir, title, model_tag)
+        plot_nc2_cosines(all_results, labels, out_dir, args.num_classes,
+                         title, model_tag)
 
 
 if __name__ == "__main__":

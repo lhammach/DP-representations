@@ -118,19 +118,15 @@ def main() -> None:
 
     if args.no_clip or args.no_noise:
         if args.no_clip:
-            # Strategy: use make_private_ablation with:
-            #   - noise_multiplier = sigma calibrated for (epsilon, C) via a temp model
-            #   - max_grad_norm = C (the real C, so noise = sigma * C, identical to DP)
-            # Then disable clipping by monkey-patching clip_and_accumulate to skip
-            # the clipping step (multiply each grad_sample by 1.0 instead of
-            # min(1, C/||g||)).
-            # This gives: g_update = mean(g^(i)) + N(0, sigma^2 * C^2 * I)
-            # with no clipping applied, and noise identical to full DP.
+            # Derive sigma from (epsilon, C) using a temporary CPU model.
+            # We only need noise_multiplier — no need to allocate VRAM.
             from opacus import PrivacyEngine as _PE
+            _cpu = torch.device("cpu")
             _tmp = build_model(cfg.model, num_classes=cfg.num_classes,
-                               cifar_stem=cfg.cifar_stem).to(device)
+                               cifar_stem=cfg.cifar_stem).to(_cpu)
             _tmp_opt = build_optimizer(_tmp, cfg.optimizer, cfg.lr, cfg.momentum)
             _pe = _PE(accountant=cfg.accountant)
+            # Use a small dummy loader for accounting only (data never used)
             _, _wrapped_opt, _ = _pe.make_private_with_epsilon(
                 module=_tmp,
                 optimizer=_tmp_opt,
@@ -140,41 +136,27 @@ def main() -> None:
                 target_delta=cfg.delta,
                 max_grad_norm=cfg.max_grad_norm,
             )
-            sigma = _wrapped_opt.noise_multiplier
+            no_clip_sigma = _wrapped_opt.noise_multiplier
             del _tmp, _tmp_opt, _pe, _wrapped_opt
-
-            dp_model, dp_optimizer, dp_train_loader, privacy_engine = make_private_ablation(
-                model=model, optimizer=optimizer, train_loader=train_loader,
-                noise_multiplier=sigma, max_grad_norm=cfg.max_grad_norm,
-                accountant=cfg.accountant,
-            )
-            # Disable clipping: override clip_and_accumulate to skip the clipping step.
-            # Opacus calls this method to clip each grad_sample before accumulation.
-            # By making it a no-op (scale factor = 1 for all examples), gradients
-            # pass through unclipped. The noise added afterwards is still sigma*C.
-            _orig_clip = dp_optimizer.clip_and_accumulate
-
-            def _no_clip_and_accumulate(*a, **kw):
-                # Accumulate without clipping: just sum grad_sample directly
-                for p in (pp for pp in dp_model.parameters()
-                          if hasattr(pp, 'grad_sample') and pp.grad_sample is not None):
-                    if p.summed_grad is None:
-                        p.summed_grad = p.grad_sample.sum(dim=0)
-                    else:
-                        p.summed_grad += p.grad_sample.sum(dim=0)
-
-            dp_optimizer.clip_and_accumulate = _no_clip_and_accumulate
             logger.info(
-                "ABLATION no-clip: sigma=%.4f, C=%.2f → effective noise std=%.4f. "
-                "clip_and_accumulate patched to skip clipping.",
-                sigma, cfg.max_grad_norm, sigma * cfg.max_grad_norm,
+                "ABLATION no-clip: sigma=%.4f, C=%.2f → noise std per batch = %.4f/B. "
+                "No Opacus wrapping — manual noise injection.",
+                no_clip_sigma, cfg.max_grad_norm,
+                no_clip_sigma * cfg.max_grad_norm,
             )
+            # no Opacus wrapping needed — use model and optimizer directly
+            dp_model = model
+            dp_optimizer = optimizer
+            dp_train_loader = train_loader
+            privacy_engine = None   # no privacy accounting for no-clip
+
         else:  # no_noise
             dp_model, dp_optimizer, dp_train_loader, privacy_engine = make_private_ablation(
                 model=model, optimizer=optimizer, train_loader=train_loader,
                 noise_multiplier=0.0, max_grad_norm=cfg.max_grad_norm,
                 accountant=cfg.accountant,
             )
+            no_clip_sigma = None
     else:
         dp_model, dp_optimizer, dp_train_loader, privacy_engine = make_private(
             model=model, optimizer=optimizer, train_loader=train_loader,
@@ -183,6 +165,7 @@ def main() -> None:
         )
 
     train_acc_history: list[float] = []
+    train_loss_history: list[float] = []
     test_acc_history: list[float] = []
     lr_history: list[float] = []
     current_epsilon: float | str = 0.0
@@ -201,6 +184,8 @@ def main() -> None:
         model_name=cfg.model, save_dir=cfg.networks_path(),
     )
 
+    from training import train_one_epoch_no_clip
+
     training_start = time.perf_counter()
 
     for epoch in range(cfg.epochs):
@@ -208,11 +193,20 @@ def main() -> None:
         current_lr = dp_optimizer.param_groups[0]["lr"]
         lr_history.append(current_lr)
 
-        train_acc, current_epsilon = train_one_epoch_dp(
-            dp_model, dp_train_loader, dp_optimizer, epoch + 1, device,
-            privacy_engine, cfg.max_physical_batch_size, cfg.delta,
-        )
+        if args.no_clip:
+            train_acc, train_loss = train_one_epoch_no_clip(
+                dp_model, dp_train_loader, dp_optimizer, epoch + 1, device,
+                noise_multiplier=no_clip_sigma,
+                max_grad_norm=cfg.max_grad_norm,
+            )
+            current_epsilon = cfg.epsilon
+        else:
+            train_acc, current_epsilon, train_loss = train_one_epoch_dp(
+                dp_model, dp_train_loader, dp_optimizer, epoch + 1, device,
+                privacy_engine, cfg.max_physical_batch_size, cfg.delta,
+            )
         train_acc_history.append(train_acc)
+        train_loss_history.append(train_loss)
 
         test_acc = evaluate(dp_model, test_loader, device, prefix=f"DP{ablation_tag} test")
         test_acc_history.append(test_acc)
@@ -232,6 +226,7 @@ def main() -> None:
                     "epoch": epoch + 1,
                     "model_state_dict": unwrap_state_dict(dp_model),
                     "train_acc_history": train_acc_history,
+                    "train_loss_history": train_loss_history,
                     "test_acc_history": test_acc_history,
                     "lr_history": lr_history,
                     "epsilon": current_epsilon,
@@ -263,6 +258,7 @@ def main() -> None:
             "epoch": cfg.epochs,
             "model_state_dict": unwrap_state_dict(dp_model),
             "train_acc_history": train_acc_history,
+            "train_loss_history": train_loss_history,
             "test_acc_history": test_acc_history,
             "lr_history": lr_history,
             "lr_scheduler": cfg.lr_scheduler,

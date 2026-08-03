@@ -79,6 +79,7 @@ def main() -> None:
     )
 
     train_acc_history: list[float] = []
+    train_loss_history: list[float] = []
     test_acc_history: list[float] = []
     lr_history: list[float] = []
     training_start = time.perf_counter()
@@ -88,8 +89,10 @@ def main() -> None:
         current_lr = optimizer.param_groups[0]["lr"]
         lr_history.append(current_lr)
 
-        train_acc = train_one_epoch_baseline(model, train_loader, optimizer, epoch + 1, device)
+        train_acc, train_loss = train_one_epoch_baseline(
+            model, train_loader, optimizer, epoch + 1, device)
         train_acc_history.append(train_acc)
+        train_loss_history.append(train_loss)
         test_acc = evaluate(model, test_loader, device, prefix="Baseline test")
         test_acc_history.append(test_acc)
 
@@ -106,6 +109,7 @@ def main() -> None:
                 model_state_dict=model.state_dict(),
                 payload={
                     "train_acc_history": train_acc_history,
+                    "train_loss_history": train_loss_history,
                     "test_acc_history": test_acc_history,
                     "lr_history": lr_history,
                     "seed": cfg.seed, "lr": cfg.lr,
@@ -127,6 +131,7 @@ def main() -> None:
             "epoch": cfg.epochs,
             "model_state_dict": model.state_dict(),
             "train_acc_history": train_acc_history,
+            "train_loss_history": train_loss_history,
             "test_acc_history": test_acc_history,
             "lr_history": lr_history,
             "lr_scheduler": cfg.lr_scheduler,
