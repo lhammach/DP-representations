@@ -35,7 +35,8 @@ class Config:
     batch_size: int = 128
     seed: int = 42
     optimizer: str = "sgd"       # "sgd" | "adam" | "rmsprop"
-    momentum: float = 0.9        # used only with sgd
+    momentum: float = 0.9
+    weight_decay: float = 0.0   # 0.0 for CNN, 0.05 recommended for ViT        # used only with sgd
     cifar_stem: bool = False     # True = 3x3 conv stem adapted for 32x32 CIFAR-10 images
     model: str = "resnet18"      # "resnet18" | "wideresnet-16-4" | "wideresnet-16-8" | "wideresnet-40-4"
     lr_scheduler: str = "none"   # "none" | "cosine"

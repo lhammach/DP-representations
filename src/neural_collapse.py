@@ -141,6 +141,11 @@ def extract_penultimate(
     labels = torch.cat(labels_list, dim=0).numpy()
     preds = torch.cat(preds_list, dim=0).numpy()
 
+    # Store full-dataset preds BEFORE the correct_only filter,
+    # so log_per_class_accuracy can report on all examples.
+    preds_all = preds.copy()
+    labels_all = labels.copy()
+
     if correct_only:
         mask = (preds == labels)
         n_total = len(labels)
@@ -151,24 +156,27 @@ def extract_penultimate(
                     n_correct, n_total, 100 * n_correct / n_total)
 
     logger.info("Extracted features: shape=%s", features.shape)
-    return features, labels
+    return features, labels, preds_all, labels_all
 
 
 def log_per_class_accuracy(
-    features: np.ndarray,
+    preds: np.ndarray,
     labels: np.ndarray,
-    W: np.ndarray,
     num_classes: int,
     class_names: list[str] | None = None,
 ) -> dict[int, dict]:
-    """Compute and log per-class accuracy + number of correctly classified examples.
+    """Compute and log per-class accuracy from model predictions.
 
-    Uses the classifier weight matrix W to predict classes (argmax of W @ h).
-    Returns a dict {class_id: {n_total, n_correct, accuracy}}.
+    Args:
+        preds : (N,) array of predicted class indices from the full forward pass
+        labels: (N,) array of true class indices
+        num_classes: number of classes
+        class_names: optional list of class names
+
+    Note: preds must come from the model's actual forward pass (argmax of logits),
+    NOT from features @ W.T which ignores the bias and any normalization applied
+    between the penultimate representation and the classifier output.
     """
-    logits = features @ W.T        # (N, C)
-    preds = np.argmax(logits, axis=1)
-
     names = class_names or [str(c) for c in range(num_classes)]
     per_class: dict[int, dict] = {}
 
@@ -182,7 +190,7 @@ def log_per_class_accuracy(
         n_correct = int(((preds == c) & mask_c).sum())
         acc = n_correct / n_total if n_total > 0 else 0.0
         per_class[c] = {"class": names[c], "n_total": n_total,
-                        "n_correct": n_correct, "accuracy": acc}
+                        "n_correct": n_correct, "accuracy": float(acc)}
         logger.info("  %-12s  %6d  %7d  %7.1f%%",
                     names[c], n_total, n_correct, 100 * acc)
 
@@ -538,7 +546,7 @@ def main() -> None:
     for ckpt_path in args.ckpt:
         logger.info("=== %s ===", Path(ckpt_path).name)
         model, W, b, epoch = _load_model_and_head(ckpt_path, args.num_classes, device)
-        features, labels_arr = extract_penultimate(
+        features, labels_arr, preds_all, labels_all = extract_penultimate(
             model, loader, device, args.num_classes,
             layer_index=args.layer_index,
             correct_only=args.correct_only,
@@ -547,13 +555,14 @@ def main() -> None:
         metrics["epoch"] = epoch
         metrics["checkpoint"] = str(ckpt_path)
 
-        # Per-class accuracy (always computed, logged when --correct-only or --verbose)
+        # Per-class accuracy computed on ALL examples (before correct_only filter)
+        # using the model's actual forward-pass predictions (not W @ features)
         class_names = args.class_names or [
             "airplane", "automobile", "bird", "cat", "deer",
             "dog", "frog", "horse", "ship", "truck"
         ][:args.num_classes]
         per_class = log_per_class_accuracy(
-            features, labels_arr, W, args.num_classes, class_names
+            preds_all, labels_all, args.num_classes, class_names
         )
         metrics["per_class_accuracy"] = per_class
         all_results.append(metrics)

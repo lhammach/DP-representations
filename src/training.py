@@ -38,26 +38,61 @@ def build_optimizer(
     optimizer: str,
     lr: float,
     momentum: float = 0.9,
+    weight_decay: float = 0.0,
 ) -> optim.Optimizer:
     """Build the optimizer from a name string.
 
     Supported values: "sgd", "adam", "rmsprop".
 
+    Weight decay:
+        For CNNs (ResNet18, WideResNet), weight_decay=0 is the default.
+        For ViT, weight_decay=0.05 is recommended (standard in DeiT/BEiT).
+        When weight_decay > 0, biases and LayerNorm parameters are excluded
+        from weight decay (standard practice for transformers — applying L2
+        regularization to LayerNorm weights disrupts normalization).
+
     Recommended starting points for DP-SGD on CIFAR-10:
-    - SGD   : lr=0.1, momentum=0.9  (classic, theoretically well-understood with DP)
-    - Adam  : lr=1e-3
-    - RMSprop: lr=1e-3 (generally worse for DP due to adaptive stat corruption by noise)
+    - SGD   : lr=0.032–0.1, momentum=0.9
+    - Adam  : lr=1e-3, weight_decay=0.05 (for ViT)
     """
     name = optimizer.lower().strip()
+
+    # Split parameters: no weight decay for biases and LayerNorm
+    if weight_decay > 0:
+        decay_params = []
+        no_decay_params = []
+        for pname, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            # No weight decay for: bias, LayerNorm weight/bias, embedding params
+            if (pname.endswith(".bias")
+                    or "norm" in pname.lower()
+                    or pname in ("pos_embedding", "cls_token")
+                    or "temperature" in pname):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+        param_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+        logger.info("Weight decay=%.4f applied to %d param groups "
+                    "(%d decay, %d no-decay)",
+                    weight_decay, 2, len(decay_params), len(no_decay_params))
+    else:
+        param_groups = model.parameters()
+
     if name == "sgd":
-        opt = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
-        logger.info("Optimizer: SGD (lr=%g, momentum=%g)", lr, momentum)
+        opt = optim.SGD(param_groups, lr=lr, momentum=momentum,
+                        weight_decay=weight_decay if weight_decay > 0 else 0)
+        logger.info("Optimizer: SGD (lr=%g, momentum=%g, wd=%g)",
+                    lr, momentum, weight_decay)
     elif name == "adam":
-        opt = optim.Adam(model.parameters(), lr=lr)
-        logger.info("Optimizer: Adam (lr=%g)", lr)
+        opt = optim.Adam(param_groups, lr=lr)
+        logger.info("Optimizer: Adam (lr=%g, wd=%g)", lr, weight_decay)
     elif name == "rmsprop":
-        opt = optim.RMSprop(model.parameters(), lr=lr)
-        logger.info("Optimizer: RMSprop (lr=%g)", lr)
+        opt = optim.RMSprop(param_groups, lr=lr)
+        logger.info("Optimizer: RMSprop (lr=%g, wd=%g)", lr, weight_decay)
     else:
         raise ValueError(f"Unknown optimizer '{optimizer}'. Choose from: sgd, adam, rmsprop.")
     return opt

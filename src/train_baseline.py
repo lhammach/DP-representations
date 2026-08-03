@@ -65,7 +65,8 @@ def main() -> None:
 
     model = build_model(cfg.model, num_classes=cfg.num_classes,
                         cifar_stem=cfg.cifar_stem).to(device)
-    optimizer = build_optimizer(model, cfg.optimizer, cfg.lr, cfg.momentum)
+    optimizer = build_optimizer(model, cfg.optimizer, cfg.lr, cfg.momentum,
+                                weight_decay=cfg.weight_decay)
     scheduler = build_scheduler(optimizer, cfg.lr_scheduler, cfg.epochs, cfg.lr_min)
 
     checkpoint_every = cfg.checkpoint_every  # 0 = disabled, N = every N epochs

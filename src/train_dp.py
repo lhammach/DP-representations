@@ -114,7 +114,8 @@ def main() -> None:
 
     model = build_model(cfg.model, num_classes=cfg.num_classes,
                         cifar_stem=cfg.cifar_stem).to(device)
-    optimizer = build_optimizer(model, cfg.optimizer, cfg.lr, cfg.momentum)
+    optimizer = build_optimizer(model, cfg.optimizer, cfg.lr, cfg.momentum,
+                                weight_decay=cfg.weight_decay)
 
     if args.no_clip or args.no_noise:
         if args.no_clip:
