@@ -74,6 +74,7 @@ from logging_utils import setup_logging
 from model import build_model, build_resnet18_dp_compatible, list_learnable_layers
 from visualization import (
     plot_accuracy_curves,
+    plot_loss_curves,
     plot_cka_results,
     plot_diagonal_stats,
     plot_epsilon_layer_heatmap,
@@ -455,7 +456,104 @@ def _make_output_name(json_paths: list[str]) -> str:
     return "__vs__".join(tags)
 
 
+def cmd_plot_loss(args: argparse.Namespace, cfg) -> None:
+    """Load checkpoint JSONs and plot train loss curves."""
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red",
+              "tab:purple", "tab:brown", "tab:pink", "tab:olive"]
+
+    series = []
+    for idx, json_path in enumerate(args.jsons):
+        with open(json_path) as f:
+            meta = json.load(f)
+
+        if "train_loss_history" not in meta:
+            logger.warning(
+                "%s has no train_loss_history — skipping. "
+                "Re-run training with the current train_baseline.py / train_dp.py "
+                "or patch the JSON from the .pth payload.",
+                Path(json_path).name,
+            )
+            continue
+
+        label = _make_series_label(meta)
+        series.append({
+            "train_loss_history": meta["train_loss_history"],
+            "label": label,
+            "color": colors[idx % len(colors)],
+        })
+        logger.info(
+            "Loaded: %s | final train loss=%.4f",
+            Path(json_path).name,
+            meta["train_loss_history"][-1],
+        )
+
+    if not series:
+        logger.error("No valid series found — all JSONs missing train_loss_history.")
+        return
+
+    out_dir = Path(args.out_dir) if args.out_dir else Path(cfg.networks_path())
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = _timestamp()
+    param_tag = _make_output_name(args.jsons)
+    if len(param_tag) > 120:
+        param_tag = param_tag[:120] + "_etc"
+    save_path = out_dir / f"loss_{param_tag}_{ts}.png"
+
+    title = args.title or f"Train loss ({len(series)} checkpoint{'s' if len(series) != 1 else ''})"
+    plot_loss_curves(series, title=title, save_path=save_path)
+    logger.info("Loss plot saved: %s", save_path)
+
+
 def cmd_plot_accuracy(args: argparse.Namespace, cfg) -> None:
+    """Load checkpoint JSONs and plot convergence curves for all of them."""
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red",
+              "tab:purple", "tab:brown", "tab:pink", "tab:olive"]
+
+    series = []
+    for idx, json_path in enumerate(args.jsons):
+        with open(json_path) as f:
+            meta = json.load(f)
+
+        label = _make_series_label(meta)
+        series.append({
+            "train_acc_history": meta["train_acc_history"],
+            "test_acc_history": meta["test_acc_history"],
+            "label": label,
+            "color": colors[idx % len(colors)],
+        })
+        logger.info(
+            "Loaded: %s | final test acc=%.1f%%",
+            Path(json_path).name,
+            meta["test_acc_history"][-1] * 100,
+        )
+
+    out_dir = Path(args.out_dir) if args.out_dir else Path(cfg.networks_path())
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = _timestamp()
+    param_tag = _make_output_name(args.jsons)
+    if len(param_tag) > 120:
+        param_tag = param_tag[:120] + "_etc"
+    filename = f"accuracy_{param_tag}_{ts}.png"
+    save_path = out_dir / filename
+
+    title = args.title or f"Accuracy convergence ({len(series)} checkpoint{'s' if len(series) != 1 else ''})"
+    plot_accuracy_curves(series, title=title, save_path=save_path)
+
+    summary_path = save_path.with_suffix(".json")
+    with open(summary_path, "w") as f:
+        json.dump({
+            "title": title,
+            "source_jsons": args.jsons,
+            "final_test_accs": {
+                s["label"]: s["test_acc_history"][-1] * 100
+                for s in series
+            },
+        }, f, indent=2)
+
+    logger.info("Accuracy plot saved: %s", save_path)
+    logger.info("Summary JSON saved: %s", summary_path)
     """Load checkpoint JSONs and plot convergence curves for all of them."""
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red",
               "tab:purple", "tab:brown", "tab:pink", "tab:olive"]
@@ -896,6 +994,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory (default: results/<experiment>/ from config).",
     )
     p_acc.set_defaults(func=cmd_plot_accuracy)
+
+    p_loss = subparsers.add_parser(
+        "plot-loss",
+        help="Plot train loss curves from one or several checkpoint JSON files",
+    )
+    p_loss.add_argument(
+        "--jsons", nargs="+", required=True,
+        help="One or more checkpoint .json files. Each becomes one line in the plot.",
+    )
+    p_loss.add_argument("--title", default=None)
+    p_loss.add_argument(
+        "--out-dir", default=None,
+        help="Output directory (default: results/<experiment>/ from config).",
+    )
+    p_loss.set_defaults(func=cmd_plot_loss)
 
     p_anim = subparsers.add_parser(
         "animate",

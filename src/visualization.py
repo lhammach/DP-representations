@@ -185,6 +185,45 @@ def plot_fine_grained_matrix(
     _save_or_show(save_path)
 
 
+def plot_loss_curves(
+    series: list[dict],
+    title: str = "",
+    save_path: str | Path | None = None,
+) -> None:
+    """Plot train loss curves for one or several checkpoints.
+
+    Args:
+        series: list of dicts, one per checkpoint. Each dict must contain:
+            - "train_loss_history": list[float]
+            - "label": str
+            - "color": str (optional)
+    """
+    default_colors = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple",
+                      "tab:brown", "tab:pink", "tab:gray", "tab:olive", "tab:cyan"]
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+
+    for idx, s in enumerate(series):
+        color = s.get("color") or default_colors[idx % len(default_colors)]
+        linestyle = s.get("linestyle", "-")
+        label = s.get("label", f"Series {idx+1}")
+        hist = s["train_loss_history"]
+        ax.plot(range(1, len(hist) + 1), hist,
+                label=label, color=color, linestyle=linestyle,
+                marker="o", markersize=3)
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Train Loss (Cross-Entropy)")
+    ax.set_title("Train Loss")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    ax.legend(fontsize=8)
+
+    if title:
+        fig.suptitle(title, fontsize=11, y=1.01)
+    plt.tight_layout()
+    _save_or_show(save_path)
+
+
 def plot_mean_heatmap(
     mean_matrix: np.ndarray,
     layers: list[str],
