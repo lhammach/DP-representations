@@ -185,6 +185,68 @@ def plot_fine_grained_matrix(
     _save_or_show(save_path)
 
 
+def plot_accuracy_curves_with_ci(
+    groups: list[dict],
+    title: str = "",
+    save_path: str | Path | None = None,
+) -> None:
+    """Plot mean ± 95% CI accuracy curves for groups of seeds.
+
+    Args:
+        groups: list of dicts, one per condition. Each dict must contain:
+            - "label"           : str
+            - "color"           : str (optional)
+            - "train_histories" : list[list[float]]  — one list per seed
+            - "test_histories"  : list[list[float]]  — one list per seed
+    """
+    import scipy.stats as _st
+
+    default_colors = ["tab:blue", "tab:orange", "tab:green",
+                      "tab:red", "tab:purple", "tab:brown"]
+
+    fig, (ax_train, ax_test) = plt.subplots(1, 2, figsize=(12, 4), sharey=False)
+
+    for idx, g in enumerate(groups):
+        color = g.get("color") or default_colors[idx % len(default_colors)]
+        label = g["label"]
+
+        for ax, key, ax_title in [
+            (ax_train, "train_histories", "Train accuracy"),
+            (ax_test,  "test_histories",  "Test accuracy"),
+        ]:
+            hists = np.array(g[key]) * 100      # (n_seeds, n_epochs), in %
+            n_seeds, n_epochs = hists.shape
+            epochs = np.arange(1, n_epochs + 1)
+
+            mean = hists.mean(axis=0)
+            sem  = hists.std(axis=0, ddof=1) / np.sqrt(n_seeds)
+            ci   = _st.t.ppf(0.975, df=n_seeds - 1) * sem
+
+            ax.plot(epochs, mean, color=color, linewidth=2,
+                    label=f"{label} ({n_seeds} seeds)")
+            ax.fill_between(epochs, mean - ci, mean + ci,
+                            color=color, alpha=0.15,
+                            label=f"IC 95% ({label})")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Accuracy (%)")
+            ax.set_title(ax_title)
+            ax.grid(True, linestyle="--", alpha=0.5)
+
+        # Deduplicate legend entries
+        for ax in (ax_train, ax_test):
+            handles, labels_leg = ax.get_legend_handles_labels()
+            seen, h_dedup, l_dedup = set(), [], []
+            for h, l in zip(handles, labels_leg):
+                if l not in seen:
+                    seen.add(l); h_dedup.append(h); l_dedup.append(l)
+            ax.legend(h_dedup, l_dedup, fontsize=9)
+
+    if title:
+        fig.suptitle(title, fontsize=11, y=1.01)
+    plt.tight_layout()
+    _save_or_show(save_path)
+
+
 def plot_loss_curves(
     series: list[dict],
     title: str = "",
@@ -305,9 +367,9 @@ def plot_zscore_heatmap(
     std_safe = np.maximum(std_matrix_ref, std_floor)
     zscore = (mean_matrix_target - mean_matrix_ref) / std_safe
     num_layers = len(layers)
-    fig_size = max(6, num_layers * 0.45)
+    fig_size = max(10, num_layers * 0.85)
 
-    fig, axes = plt.subplots(1, 4, figsize=(fig_size * 4, fig_size * 0.95))
+    fig, axes = plt.subplots(1, 4, figsize=(fig_size * 4, fig_size * 1.1))
 
     def _setup(ax, mat, cmap, vmin, vmax, title_ax, xl, yl, cbar_label):
         im = ax.imshow(mat, cmap=cmap, vmin=vmin, vmax=vmax, origin="lower")
@@ -321,37 +383,51 @@ def plot_zscore_heatmap(
         ax.set_title(title_ax, fontsize=8, pad=6)
         return im
 
+    def _annotate(ax, mat, vmin, vmax, fmt=".2f"):
+        """Annotate each cell with its value; choose text color for contrast."""
+        mid = (vmin + vmax) / 2
+        fsize = max(10, 14 - max(0, num_layers - 10))
+        for i in range(num_layers):
+            for j in range(num_layers):
+                v = mat[i, j]
+                color = "white" if v < mid else "black"
+                ax.text(j, i, format(v, fmt),
+                        ha="center", va="center",
+                        fontsize=fsize, color=color, fontweight="bold")
+
     # Panel 1: target CKA
     _setup(axes[0], mean_matrix_target, "viridis", 0, 1,
            f"Target CKA\n{ylabel} vs {xlabel}",
            xlabel, ylabel, "Mean CKA")
+    _annotate(axes[0], mean_matrix_target, 0, 1)
 
     # Panel 2: reference mean CKA
     _setup(axes[1], mean_matrix_ref, "viridis", 0, 1,
            "Reference mean CKA\n(Baseline vs Baseline)",
            "Baseline", "Baseline", "Mean CKA")
+    _annotate(axes[1], mean_matrix_ref, 0, 1)
 
     # Panel 3: reference std CKA
     std_vmax = max(std_matrix_ref.max(), 1e-3)
     _setup(axes[2], std_matrix_ref, "magma", 0, std_vmax,
            f"Reference std CKA\n(inter-seed variability, floor={std_floor})",
            "Baseline", "Baseline", "Std CKA")
+    _annotate(axes[2], std_matrix_ref, 0, std_vmax, fmt=".3f")
 
     # Panel 4: z-score with annotated values
     vabs = max(abs(zscore.min()), abs(zscore.max()), 1.0)
     _setup(axes[3], zscore, "RdBu_r", -vabs, vabs,
-           f"Z-score\nBlue = below ref  |  Red = above ref",
+           "Z-score\nBlue = below ref  |  Red = above ref",
            xlabel, ylabel, "Z-score")
 
-    # Annotate z-score values
-    thresh = vabs * 0.4   # use white text on strongly colored cells
+    fsize = max(10, 14 - max(0, num_layers - 10))
+    thresh = vabs * 0.4
     for i in range(num_layers):
         for j in range(num_layers):
             v = zscore[i, j]
             color = "white" if abs(v) > thresh else "black"
             axes[3].text(j, i, f"{v:.1f}", ha="center", va="center",
-                         fontsize=max(3, 6 - num_layers // 5),
-                         color=color, fontweight="bold")
+                         fontsize=fsize, color=color, fontweight="bold")
 
     plt.suptitle(title, fontsize=10, y=1.01)
     plt.tight_layout()

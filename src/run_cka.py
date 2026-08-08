@@ -74,6 +74,7 @@ from logging_utils import setup_logging
 from model import build_model, build_resnet18_dp_compatible, list_learnable_layers
 from visualization import (
     plot_accuracy_curves,
+    plot_accuracy_curves_with_ci,
     plot_loss_curves,
     plot_cka_results,
     plot_diagonal_stats,
@@ -503,6 +504,49 @@ def cmd_plot_loss(args: argparse.Namespace, cfg) -> None:
     title = args.title or f"Train loss ({len(series)} checkpoint{'s' if len(series) != 1 else ''})"
     plot_loss_curves(series, title=title, save_path=save_path)
     logger.info("Loss plot saved: %s", save_path)
+
+
+def cmd_plot_accuracy_ci(args: argparse.Namespace, cfg) -> None:
+    """Plot mean ± 95% CI accuracy curves, grouping multiple JSONs per condition.
+
+    --jsons lists all JSON files; --group-sizes splits them into conditions;
+    --group-labels names each condition.
+    """
+    colors = ["tab:blue", "tab:orange", "tab:green",
+              "tab:red", "tab:purple", "tab:brown"]
+
+    # Load all histories
+    all_train, all_test = [], []
+    for json_path in args.jsons:
+        with open(json_path) as f:
+            meta = json.load(f)
+        all_train.append(meta["train_acc_history"])
+        all_test.append(meta["test_acc_history"])
+
+    # Split into groups
+    sizes = args.group_sizes or [len(args.jsons)]
+    labels = args.group_labels or [f"Group {i+1}" for i in range(len(sizes))]
+
+    groups = []
+    idx = 0
+    for i, (size, label) in enumerate(zip(sizes, labels)):
+        groups.append({
+            "label": label,
+            "color": colors[i % len(colors)],
+            "train_histories": all_train[idx:idx + size],
+            "test_histories":  all_test[idx:idx + size],
+        })
+        idx += size
+
+    out_dir = Path(cfg.networks_path())
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = _timestamp()
+    tag = "_".join(g["label"].replace(" ", "_") for g in groups)
+    save_path = out_dir / f"accuracy_ci_{tag}_{ts}.png"
+
+    title = args.title or f"Accuracy — {cfg.experiment}"
+    plot_accuracy_curves_with_ci(groups, title=title, save_path=save_path)
+    logger.info("Saved: %s", save_path)
 
 
 def cmd_plot_accuracy(args: argparse.Namespace, cfg) -> None:
@@ -994,6 +1038,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory (default: results/<experiment>/ from config).",
     )
     p_acc.set_defaults(func=cmd_plot_accuracy)
+
+    p_acci = subparsers.add_parser(
+        "plot-accuracy-ci",
+        help="Plot mean ± 95% CI accuracy curves grouping multiple seeds per condition",
+    )
+    p_acci.add_argument(
+        "--jsons", nargs="+", required=True,
+        help="All checkpoint JSON files (all seeds, all conditions).",
+    )
+    p_acci.add_argument(
+        "--group-sizes", nargs="+", type=int, default=None,
+        help="Number of seeds per condition, e.g. --group-sizes 6 6 for two groups of 6.",
+    )
+    p_acci.add_argument(
+        "--group-labels", nargs="+", default=None,
+        help="Label for each condition, e.g. --group-labels Baseline DP.",
+    )
+    p_acci.add_argument("--title", default=None)
+    p_acci.set_defaults(func=cmd_plot_accuracy_ci)
 
     p_loss = subparsers.add_parser(
         "plot-loss",
